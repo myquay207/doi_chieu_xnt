@@ -1,48 +1,33 @@
 import io, re, warnings
 import streamlit as st
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings("ignore")
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CẤU HÌNH GIAO DIỆN
-# ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Đối Chiếu Dược – BV Đà Nẵng", page_icon="🏥", layout="wide")
 
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;600;700&display=swap');
-    html,body,[class*="css"]{font-family:'Be Vietnam Pro',sans-serif;}
-    .hero{background:linear-gradient(135deg,#1a3a5c 0%,#2563a8 60%,#1e7fcb 100%);
-      border-radius:16px;padding:32px;margin-bottom:24px;color:white;text-align:center;}
-    .stat-card{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.05);}
-    .num{font-size:1.8rem;font-weight:700;}
-</style>
-""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  LOGIC XỬ LÝ FILE LINH HOẠT (KHÔNG PHỤ THUỘC SỐ DÒNG)
-# ══════════════════════════════════════════════════════════════════════════════
-
+# --- HÀM CHUẨN HÓA TÊN ---
 def norm(s):
     if not isinstance(s, str): return ""
     s = s.strip().lower()
     s = re.sub(r'(\d),(\d)', r'\1.\2', s)
     return re.sub(r'\s+', ' ', s).strip()
 
-def flexible_read_excel(file_content, keywords=["tên thuốc", "số lượng", "sổ sách"]):
-    """Tìm dòng tiêu đề dựa trên từ khóa và lọc dữ liệu số lượng != 0"""
+# --- HÀM ĐỌC FILE CỰC KỲ LINH HOẠT ---
+def flexible_read_excel(file_content):
     try:
-        df_raw = pd.read_excel(io.BytesIO(file_content), header=None)
+        # Đọc hết các sheet, ưu tiên sheet có dữ liệu
+        all_sheets = pd.read_excel(io.BytesIO(file_content), header=None, sheet_name=None)
+        df_raw = list(all_sheets.values())[0] # Lấy sheet đầu tiên
+        
         header_idx = -1
-        # Tìm dòng chứa ít nhất 2 từ khóa
+        # Từ khóa mở rộng để không bị sót file nào của bệnh viện
+        keywords = ["tên", "đơn giá", "thành tiền", "sổ sách", "thực tế", "số lượng"]
+        
         for i, row in df_raw.iterrows():
             row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
-            matches = sum(1 for k in keywords if k in row_str)
-            if matches >= 2:
+            # Chỉ cần khớp 2 từ khóa bất kỳ là nhận diện được dòng tiêu đề
+            if sum(1 for k in keywords if k in row_str) >= 2:
                 header_idx = i
                 break
         
@@ -51,122 +36,71 @@ def flexible_read_excel(file_content, keywords=["tên thuốc", "số lượng",
         df = df_raw.iloc[header_idx + 1:].copy()
         df.columns = [str(c).strip().lower() for c in df_raw.iloc[header_idx]]
         
-        # Chỉ lấy dòng có STT là số
+        # Loại bỏ dòng rỗng và dòng không có STT (số)
         df = df[pd.to_numeric(df.iloc[:, 0], errors='coerce').notna()]
         return df
     except:
         return pd.DataFrame()
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HÀM ĐỐI CHIẾU CHÍNH (ĐÃ FIX LỖI SỐ 0 VÀ TYPEERROR)
-# ══════════════════════════════════════════════════════════════════════════════
+# --- HÀM ĐỐI CHIẾU ---
+def run_reconciliation(df_src, df_tgt):
+    # Tự tìm cột số lượng (vì mỗi file đặt tên mỗi kiểu: Tồn, Thực tế, Số lượng...)
+    def find_qty_col(df):
+        cols = df.columns
+        for c in cols:
+            if any(k in str(c) for k in ['thực tế', 'sổ sách', 'số lượng', 'tồn', 'nhập']): return c
+        return cols[-1]
 
-def run_reconciliation(df_source, df_target, type_mode="XNT"):
-    """
-    df_source: Dữ liệu cần đối chiếu (XNT thô, BBKK, hoặc BBKN)
-    df_target: Dữ liệu chuẩn (Thống kê)
-    """
-    results = []
-    used_target = set()
+    col_s = find_qty_col(df_src)
+    col_t = find_qty_col(df_tgt)
 
-    # Lọc bỏ các dòng có số lượng = 0 ngay từ đầu để làm sạch báo cáo
-    # Giả sử cột số lượng là 'tồn cuối', 'thực tế' hoặc cột có chứa chữ 'số lượng'
-    def get_qty_col(df):
-        for c in df.columns:
-            if any(k in str(c) for k in ['tồn', 'thực tế', 'số lượng', 'quantity']): return c
-        return df.columns[-1]
+    # Ép kiểu số và lọc bỏ số 0 (như bạn yêu cầu)
+    df_src[col_s] = pd.to_numeric(df_src[col_s], errors='coerce').fillna(0)
+    df_tgt[col_t] = pd.to_numeric(df_tgt[col_t], errors='coerce').fillna(0)
+    
+    df_src = df_src[df_src[col_s] != 0].copy()
+    df_tgt = df_tgt[df_tgt[col_t] != 0].copy()
 
-    col_src = get_qty_col(df_source)
-    col_tgt = get_qty_col(df_target)
+    # Tiến hành so khớp
+    res = []
+    used_tgt = set()
 
-    # Chuyển đổi số lượng về numeric để so sánh
-    df_source[col_src] = pd.to_numeric(df_source[col_src], errors='coerce').fillna(0)
-    df_target[col_tgt] = pd.to_numeric(df_target[col_tgt], errors='coerce').fillna(0)
-
-    # Lọc != 0
-    df_source = df_source[df_source[col_src] != 0].copy()
-    df_target_active = df_target[df_target[col_tgt] != 0].copy()
-
-    # Logic khớp theo Tên + Đơn giá (vì thô thường không có mã)
-    for idx_s, row_s in df_source.iterrows():
-        ten_s = norm(row_s.get('tên thuốc', row_s.iloc[1]))
-        gia_s = float(row_s.get('đơn giá', 0))
-        qty_s = float(row_s[col_src])
-
-        matched = False
-        for idx_t, row_t in df_target_active.iterrows():
-            if idx_t in used_target: continue
-            
-            ten_t = norm(row_t.get('tên thuốc', row_t.iloc[1]))
-            gia_t = float(row_t.get('đơn giá', 0))
-            
-            # Khớp tên và giá (cho phép sai lệch giá nhỏ do làm tròn)
-            if ten_s == ten_t and abs(gia_s - gia_t) < 10:
-                qty_t = float(row_t[col_tgt])
-                results.append({
-                    'ten': row_s.get('tên thuốc', row_s.iloc[1]),
-                    'gia': gia_s,
-                    'qty_src': qty_s,
-                    'qty_tgt': qty_t,
-                    'cl': qty_s - qty_t,
-                    'status': 'Khớp' if abs(qty_s - qty_t) < 0.01 else 'Lệch'
-                })
-                used_target.add(idx_t)
-                matched = True
-                break
+    for _, rs in df_src.iterrows():
+        name_s = norm(rs.iloc[1]) # Thường tên thuốc ở cột 2
+        qty_s = float(rs[col_s])
         
-        if not matched:
-            results.append({
-                'ten': row_s.get('tên thuốc', row_s.iloc[1]),
-                'gia': gia_s, 'qty_src': qty_s, 'qty_tgt': 0, 'cl': qty_s, 'status': 'Chỉ có bên gửi'
-            })
+        found = False
+        for it, rt in df_tgt.iterrows():
+            if it in used_tgt: continue
+            if name_s == norm(rt.iloc[1]):
+                qty_t = float(rt[col_t])
+                res.append({'Tên thuốc': rs.iloc[1], 'Số lượng bên gửi': qty_s, 'Số lượng Thống kê': qty_t, 'Chênh lệch': qty_s - qty_t})
+                used_tgt.add(it)
+                found = True
+                break
+        if not found:
+            res.append({'Tên thuốc': rs.iloc[1], 'Số lượng bên gửi': qty_s, 'Số lượng Thống kê': 0, 'Chênh lệch': qty_s})
 
-    # Các dòng chỉ có bên Thống kê
-    for idx_t, row_t in df_target_active.iterrows():
-        if idx_t not in used_target:
-            results.append({
-                'ten': row_t.get('tên thuốc', row_t.iloc[1]),
-                'gia': row_t.get('đơn giá', 0),
-                'qty_src': 0, 'qty_tgt': row_t[col_tgt], 'cl': -row_t[col_tgt], 'status': 'Chỉ có Thống kê'
-            })
+    for it, rt in df_tgt.iterrows():
+        if it not in used_tgt:
+            res.append({'Tên thuốc': rt.iloc[1], 'Số lượng bên gửi': 0, 'Số lượng Thống kê': rt[col_t], 'Chênh lệch': -rt[col_t]})
+            
+    return pd.DataFrame(res)
 
-    return pd.DataFrame(results)
+# --- GIAO DIỆN ---
+st.title("🏥 Đối chiếu Dược - BV Đà Nẵng (Bản Fix)")
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  GIAO DIỆN STREAMLIT
-# ══════════════════════════════════════════════════════════════════════════════
+f1 = st.file_uploader("1. Tải file BBKK / BBKN / XNT thô", type=["xlsx", "xls"])
+f2 = st.file_uploader("2. Tải file Thống kê (Chuẩn)", type=["xlsx", "xls"])
 
-st.markdown('<div class="hero"><h1>🏥 HỆ THỐNG ĐỐI CHIẾU DƯỢC LINH HOẠT</h1><p>Tự động tìm cấu trúc file | Lọc bỏ tồn bằng 0 | Hỗ trợ BBKK & BBKN</p></div>', unsafe_allow_html=True)
-
-tab1, tab2 = st.tabs(["📊 Đối chiếu dữ liệu", "⚙️ Hướng dẫn"])
-
-with tab1:
-    col_l, col_r = st.columns(2)
-    with col_l:
-        f_src = st.file_uploader("📂 Tải lên File cần đối chiếu (XNT thô / BBKK / BBKN)", type=["xlsx", "xls"])
-    with col_r:
-        f_tgt = st.file_uploader("📋 Tải lên File Thống kê (Chuẩn)", type=["xlsx", "xls"])
-
-    if f_src and f_tgt:
-        if st.button("🚀 Bắt đầu đối chiếu"):
-            df_s = flexible_read_excel(f_src.read())
-            df_t = flexible_read_excel(f_tgt.read())
-
-            if df_s.empty or df_t.empty:
-                st.error("❌ Không tìm thấy dòng tiêu đề phù hợp trong file. Hãy kiểm tra lại file có chứa các từ khóa như 'Tên thuốc', 'Số lượng', 'Sổ sách' không?")
-            else:
-                res = run_reconciliation(df_s, df_t)
-                
-                # Hiển thị thống kê
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Khớp hoàn toàn", len(res[res['status']=='Khớp']))
-                c2.metric("Chênh lệch", len(res[res['status']=='Lệch']))
-                c3.metric("Chỉ có một bên", len(res[res['status'].str.contains('Chỉ có')]))
-
-                st.dataframe(res, use_container_width=True)
-
-                # Download Excel
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    res.to_excel(writer, index=False, sheet_name='KetQua')
-                st.download_button("📥 Tải kết quả về Excel", output.getvalue(), "ket_qua_doi_chieu.xlsx")
+if f1 and f2:
+    if st.button("Bắt đầu đối chiếu"):
+        d1 = flexible_read_excel(f1.read())
+        d2 = flexible_read_excel(f2.read())
+        
+        if d1.empty or d2.empty:
+            st.error("Vẫn không tìm thấy tiêu đề. Bạn kiểm tra lại sheet chứa dữ liệu có phải là sheet đầu tiên không?")
+        else:
+            final = run_reconciliation(d1, d2)
+            st.success(f"Đã đối chiếu xong! Tìm thấy {len(final)} mặt hàng có phát sinh tồn/nhập.")
+            st.dataframe(final, use_container_width=True)
