@@ -225,9 +225,10 @@ def run_reconciliation(files_nhap_xuat, df_xnt_raw, df_tk_raw, confirmed_overrid
                 else:
                     results.append(make_row(xr, None, 'no_tk'))
 
-        else:  # Không có TK
+        else:  # Không có TK (Chỉ lấy nếu tồn XNT khác 0)
             for _, xr in grp_x.iterrows():
-                results.append(make_row(xr, None, 'no_tk'))
+                if xr['ton_xnt'] != 0:
+                    results.append(make_row(xr, None, 'no_tk'))
 
    # TK có, XNT không (Chỉ lấy những dòng có tồn > 0)
     for idx, tr in df_tk.iterrows():
