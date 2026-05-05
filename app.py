@@ -229,9 +229,10 @@ def run_reconciliation(files_nhap_xuat, df_xnt_raw, df_tk_raw, confirmed_overrid
             for _, xr in grp_x.iterrows():
                 results.append(make_row(xr, None, 'no_tk'))
 
-    # TK có, XNT không
+   # TK có, XNT không (Chỉ lấy những dòng có tồn > 0)
     for idx, tr in df_tk.iterrows():
-        if idx not in used_tk:
+        # Thêm điều kiện: chưa dùng AND tồn phải khác 0 (hoặc > 0)
+        if idx not in used_tk and abs(tr['ton_tk']) >= 0.01:
             results.append({
                 'ma': tr['ma'], 'ten': '', 'nd': '', 'gia': '',
                 'ton_xnt': None, 'ten_tk': tr['ten_tk'],
