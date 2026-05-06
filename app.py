@@ -345,11 +345,11 @@ def run_reconciliation_xnt(files_nhap_xuat, df_xnt_raw, df_tk_raw, confirmed_ove
                     results.append(make_row(xr, None, 'no_tk'))
         else:
             for _, xr in grp_x.iterrows():
-                if xr['ton_xnt'] != 0:
-                    results.append(make_row(xr, None, 'no_tk'))
+                for _, xr in grp_x.iterrows():
+    		results.append(make_row(xr, None, 'no_tk'))
 
     for idx, tr in df_tk.iterrows():
-        if idx not in used_tk and abs(tr['ton_tk']) >= 0.01:
+        if idx not in used_tk:
             results.append({
                 'ma': tr['ma'], 'ten': '', 'nd': '', 'gia': '',
                 'ton_xnt': None, 'ten_tk': tr['ten_tk'],
@@ -447,7 +447,7 @@ def run_reconciliation_kn(df_bbkn_raw, df_tk_raw, global_map, sl_col=9):
                     })
             # TK dư (không có trong BBKN)
             for j, tr in grp_tk.iterrows():
-                if j not in matched_tk and tr['nhap_tk'] > 0:
+                if j not in matched_tk:
                     results.append({
                         'ma': tr['ma'], 'ten_kn': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
                         'nhap_kn': None, 'ten_tk': tr['ten_tk'], 'nhap_tk': tr['nhap_tk'],
@@ -457,7 +457,7 @@ def run_reconciliation_kn(df_bbkn_raw, df_tk_raw, global_map, sl_col=9):
 
     # TK còn lại có nhập, BBKN không có
     for idx, tr in df_tk.iterrows():
-        if idx not in used_tk and tr['nhap_tk'] > 0:
+        if idx not in used_tk:
             results.append({
                 'ma': tr['ma'], 'ten_kn': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
                 'nhap_kn': None, 'ten_tk': tr['ten_tk'], 'nhap_tk': tr['nhap_tk'],
@@ -548,7 +548,7 @@ def run_reconciliation_kk(df_bbkk_raw, df_tk_raw, global_map, sl_col=8):
                     })
             # TK dư
             for j, tr in grp_tk.iterrows():
-                if j not in matched_tk and abs(tr['ton_tk']) >= 0.01:
+                if j not in matched_tk:
                     results.append({
                         'ma': tr['ma'], 'ten_kk': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
                         'sl_kk': None, 'ten_tk': tr['ten_tk'], 'ton_tk': tr['ton_tk'],
@@ -558,7 +558,7 @@ def run_reconciliation_kk(df_bbkk_raw, df_tk_raw, global_map, sl_col=8):
 
     # TK còn lại có tồn, KK không có
     for idx, tr in df_tk.iterrows():
-        if idx not in used_tk and abs(tr['ton_tk']) >= 0.01:
+        if idx not in used_tk:
             results.append({
                 'ma': tr['ma'], 'ten_kk': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
                 'sl_kk': None, 'ten_tk': tr['ten_tk'], 'ton_tk': tr['ton_tk'],
