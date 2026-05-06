@@ -1,6 +1,6 @@
 """
 ĐỐI CHIẾU DƯỢC – Bệnh viện Đà Nẵng
-v4 – Upload 1 lần, gộp tổng SL theo hóa đơn, sửa Concor âm, đồng nhất câu chữ
+v5 – Sửa used_tk index, tách active/inactive TK, khớp đa mã chính xác
 """
 
 import io, re, warnings
@@ -82,17 +82,13 @@ def is_drug(s):
     except: return True
 
 
-def safe_float(v, default=0.0):
+def safe_float(v):
     try: return float(v)
-    except: return default
+    except: return 0.0
 
 
 def parse_tk(df_raw):
-    """
-    Parse file XNT Thống kê.
-    col4=Mã, col5=Tên, col8=Nồng độ, col11=Đơn giá, col14=Nhập, col24=Tồn cuối
-    Giữ nguyên từng dòng (không gộp) để hỗ trợ đa mã.
-    """
+    """Parse file XNT Thống kê. Dùng reset_index để index là 0,1,2,... liên tục."""
     rows = []
     for _, row in df_raw.iloc[5:].iterrows():
         ma  = str(row[4]).strip() if not pd.isna(row[4]) else ''
@@ -100,24 +96,20 @@ def parse_tk(df_raw):
         if not ma or not ten: continue
         gia = safe_float(row[11])
         rows.append({
-            'ma':      ma,
-            'ten_tk':  ten,
+            'ma': ma, 'ten_tk': ten,
             'nd_tk':   str(row[8]).strip() if not pd.isna(row[8]) else '',
             'gia_tk':  gia,
             'nhap_tk': safe_float(row[14]),
             'ton_tk':  safe_float(row[24]),
-            'kten':    norm(ten),
-            'knd':     norm(str(row[8]) if not pd.isna(row[8]) else ''),
-            'kgia':    int(round(gia)) if gia else 0,
+            'kten': norm(ten),
+            'knd':  norm(str(row[8]) if not pd.isna(row[8]) else ''),
+            'kgia': int(round(gia)) if gia else 0,
         })
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
 
 
 def extract_ma_map(dfs_nhap_xuat):
-    """
-    Bảng mã HPT từ file nhập/xuất kho.
-    col0=STT, col1=Mã HPT, col2=Tên, col3=Nồng độ, col5=Đơn giá
-    """
+    """Bảng mã HPT từ file nhập/xuất kho (col0=STT, col1=Mã, col2=Tên, col3=ND, col5=Giá)."""
     all_rows = []
     for df in dfs_nhap_xuat:
         if df is None or df.empty: continue
@@ -129,10 +121,9 @@ def extract_ma_map(dfs_nhap_xuat):
             if not is_drug(ten): continue
             gia = safe_float(row[5])
             all_rows.append({
-                'ma':   str(row[1]).strip(),
-                'ten':  ten,
-                'nd':   str(row[3]).strip() if not pd.isna(row[3]) else '',
-                'gia':  gia,
+                'ma': str(row[1]).strip(), 'ten': ten,
+                'nd': str(row[3]).strip() if not pd.isna(row[3]) else '',
+                'gia': gia,
                 'kten': norm(ten),
                 'knd':  norm(str(row[3]) if not pd.isna(row[3]) else ''),
                 'kgia': int(round(gia)) if gia else 0,
@@ -144,24 +135,16 @@ def extract_ma_map(dfs_nhap_xuat):
 
 
 def find_ma(kten, knd, kgia, global_map):
-    """Tra mã từ global_map theo key chuẩn hóa."""
     if global_map is None or global_map.empty: return ''
-    mask = ((global_map['kten'] == kten) &
-            (global_map['knd']  == knd)  &
-            (global_map['kgia'] == kgia))
+    mask = (global_map['kten']==kten)&(global_map['knd']==knd)&(global_map['kgia']==kgia)
     matched = global_map[mask]['ma'].unique()
     return ', '.join(matched) if len(matched) > 0 else ''
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PARSE BBKN – GỘP TỔNG THEO TÊN+NỒNG ĐỘ+GIÁ (nhiều hóa đơn)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def parse_bbkn_agg(df_raw, sl_col=9):
+def parse_raw_lines_bbkn(df_raw, sl_col=9):
     """
-    Parse BBKN và GỘP TỔNG số lượng cùng tên+nồng độ+giá.
-    Vì 1 thuốc có thể có nhiều hóa đơn (Egilok: 3 HĐ → tổng 66,000).
-    Trả về: ten, nd, gia, sl_tong, n_hoadon, hoa_don_list, kten, knd, kgia
+    Parse BBKN: col0=STT, col1=Mã HĐ, col2=Tên, col3=ND, col8=Giá, col9=SL
+    Giữ TỪNG dòng – KHÔNG gộp. Thuật toán match sẽ quyết định khi nào gộp.
     """
     rows = []
     for _, row in df_raw.iterrows():
@@ -170,37 +153,20 @@ def parse_bbkn_agg(df_raw, sl_col=9):
         if pd.isna(row[2]): continue
         ten = str(row[2]).strip()
         if not is_drug(ten): continue
-        nd   = str(row[3]).strip() if not pd.isna(row[3]) else ''
-        gia  = safe_float(row[8])
-        sl   = safe_float(row[sl_col if isinstance(sl_col, int) else 9])
+        nd    = str(row[3]).strip() if not pd.isna(row[3]) else ''
+        gia   = safe_float(row[8])
+        sl    = safe_float(row[sl_col])
         ma_hd = str(row[1]).strip() if not pd.isna(row[1]) else ''
-        rows.append({
-            'ten': ten, 'nd': nd, 'gia': gia, 'sl': sl, 'ma_hd': ma_hd,
-            'kten': norm(ten), 'knd': norm(nd),
-            'kgia': int(round(gia)) if gia else 0,
-        })
-    if not rows: return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    # Gộp tổng — giữ danh sách hóa đơn để tra cứu
-    agg = (df.groupby(['kten', 'knd', 'kgia'], as_index=False)
-             .agg(ten        = ('ten',   'first'),
-                  nd         = ('nd',    'first'),
-                  gia        = ('gia',   'first'),
-                  sl_tong    = ('sl',    'sum'),
-                  n_hoadon   = ('sl',    'count'),
-                  hoa_don    = ('ma_hd', lambda x: ', '.join([v for v in x if v]))))
-    return agg
+        rows.append({'ten': ten, 'nd': nd, 'gia': gia, 'sl': sl, 'ma_hd': ma_hd,
+                     'kten': norm(ten), 'knd': norm(nd),
+                     'kgia': int(round(gia)) if gia else 0})
+    return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PARSE BBKK – GỘP TỔNG THEO TÊN+NỒNG ĐỘ+GIÁ (kể cả dòng điều chỉnh âm)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def parse_bbkk_agg(df_raw, sl_col=8):
+def parse_raw_lines_bbkk(df_raw, sl_col=8):
     """
-    Parse BBKK và GỘP TỔNG số lượng cùng tên+nồng độ+giá.
-    Dòng âm (Concor -0.17) là bút toán điều chỉnh → cộng gộp vào tổng.
-    Trả về: ten, nd, gia, sl_tong, n_dong, kten, knd, kgia
+    Parse BBKK: col0=STT, col1=Tên, col2=ND, col4=Giá, col8=SL thực tế
+    Giữ TỪNG dòng – KHÔNG gộp.
     """
     rows = []
     for _, row in df_raw.iterrows():
@@ -211,21 +177,123 @@ def parse_bbkk_agg(df_raw, sl_col=8):
         if not is_drug(ten): continue
         nd  = str(row[2]).strip() if not pd.isna(row[2]) else ''
         gia = safe_float(row[4])
-        sl  = safe_float(row[sl_col if isinstance(sl_col, int) else 8])
-        rows.append({
-            'ten': ten, 'nd': nd, 'gia': gia, 'sl': sl,
-            'kten': norm(ten), 'knd': norm(nd),
-            'kgia': int(round(gia)) if gia else 0,
-        })
-    if not rows: return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    agg = (df.groupby(['kten', 'knd', 'kgia'], as_index=False)
-             .agg(ten     = ('ten', 'first'),
-                  nd      = ('nd',  'first'),
-                  gia     = ('gia', 'first'),
-                  sl_tong = ('sl',  'sum'),
-                  n_dong  = ('sl',  'count')))
-    return agg
+        sl  = safe_float(row[sl_col])
+        rows.append({'ten': ten, 'nd': nd, 'gia': gia, 'sl': sl, 'ma_hd': '',
+                     'kten': norm(ten), 'knd': norm(nd),
+                     'kgia': int(round(gia)) if gia else 0})
+    return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  THUẬT TOÁN KHỚP THỐNG NHẤT (dùng cho cả KN và KK)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def match_hpt_to_tk(df_hpt, df_tk, sl_col_tk):
+    """
+    Thuật toán khớp đa mã, xử lý đúng mọi trường hợp:
+
+    Với mỗi nhóm HPT cùng kten+knd+kgia:
+      - Lọc TK available theo key, tách thành active (sl > 0) và inactive (sl = 0)
+      - Inactive TK: đánh dấu used nhưng không tạo kết quả (không báo lỗi giả)
+      - 0 active TK  → hpt_no_tk
+      - 1 active TK  → gộp tổng HPT rồi so với TK đó (nhiều HĐ → 1 mã)
+      - N active TK  → khớp 1-1 từng dòng HPT với TK gần nhất theo SL
+                       (Xatral 6000↔6000, 18000↔18000)
+    """
+    results = []
+    used_tk_idx = set()   # lưu df_tk.index thực sự (integer)
+
+    def is_active(tk_val):
+        return (sl_col_tk == 'nhap_tk' and tk_val > 0) or \
+               (sl_col_tk == 'ton_tk'  and abs(tk_val) >= 0.01)
+
+    for (kten, knd, kgia), grp_hpt in df_hpt.groupby(['kten', 'knd', 'kgia'], sort=False):
+        mask     = (df_tk['kten']==kten)&(df_tk['knd']==knd)&(df_tk['kgia']==kgia)
+        avail_tk = df_tk[mask & ~df_tk.index.isin(used_tk_idx)]
+        hpt_list = grp_hpt.reset_index(drop=True)
+        sl_sum   = hpt_list['sl'].sum()
+        hoa_don  = ', '.join([v for v in hpt_list['ma_hd'] if v])
+        ten0, nd0, gia0 = hpt_list.iloc[0]['ten'], hpt_list.iloc[0]['nd'], hpt_list.iloc[0]['gia']
+
+        def row_hpt_no_tk():
+            return {'ma': '', 'ten_hpt': ten0, 'nd': nd0, 'gia': gia0,
+                    'sl_hpt': sl_sum, 'hoa_don': hoa_don,
+                    'ten_tk': '', 'sl_tk': None, 'cl': None, 'status': 'hpt_no_tk'}
+
+        def row_matched(sl_hpt, hd, tr):
+            tk_val = tr[sl_col_tk]
+            return {'ma': tr['ma'], 'ten_hpt': ten0, 'nd': nd0, 'gia': gia0,
+                    'sl_hpt': sl_hpt, 'hoa_don': hd,
+                    'ten_tk': tr['ten_tk'], 'sl_tk': tk_val,
+                    'cl': sl_hpt - tk_val, 'status': 'matched'}
+
+        def row_tk_no_hpt(tr):
+            return {'ma': tr['ma'], 'ten_hpt': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
+                    'sl_hpt': None, 'hoa_don': '',
+                    'ten_tk': tr['ten_tk'], 'sl_tk': tr[sl_col_tk],
+                    'cl': None, 'status': 'tk_no_hpt'}
+
+        if len(avail_tk) == 0:
+            results.append(row_hpt_no_tk()); continue
+
+        # Tách active / inactive
+        active_idx   = [i for i in avail_tk.index if is_active(avail_tk.loc[i, sl_col_tk])]
+        inactive_idx = [i for i in avail_tk.index if not is_active(avail_tk.loc[i, sl_col_tk])]
+
+        # Inactive: đánh dấu used, không báo lỗi
+        for i in inactive_idx:
+            used_tk_idx.add(i)
+
+        if len(active_idx) == 0:
+            results.append(row_hpt_no_tk()); continue
+
+        if len(active_idx) == 1:
+            # 1 active TK → gộp tổng HPT
+            ti = active_idx[0]
+            results.append(row_matched(sl_sum, hoa_don, df_tk.loc[ti]))
+            used_tk_idx.add(ti); continue
+
+        # N active TK → khớp 1-1 từng dòng HPT với TK gần nhất
+        tk_pool = list(active_idx)
+        matched_tk = set(); matched_hpt = set()
+
+        # Pass 1: exact match
+        for hi, hr in hpt_list.iterrows():
+            for ti in tk_pool:
+                if ti in matched_tk: continue
+                if abs(hr['sl'] - df_tk.loc[ti, sl_col_tk]) < 0.01:
+                    results.append(row_matched(hr['sl'], hr['ma_hd'], df_tk.loc[ti]))
+                    matched_tk.add(ti); matched_hpt.add(hi); used_tk_idx.add(ti); break
+
+        # Pass 2: nearest for remaining
+        for hi, hr in hpt_list.iterrows():
+            if hi in matched_hpt: continue
+            best_ti, best_d = None, float('inf')
+            for ti in tk_pool:
+                if ti in matched_tk: continue
+                d = abs(hr['sl'] - df_tk.loc[ti, sl_col_tk])
+                if d < best_d: best_d, best_ti = d, ti
+            if best_ti is not None:
+                results.append(row_matched(hr['sl'], hr['ma_hd'], df_tk.loc[best_ti]))
+                matched_tk.add(best_ti); used_tk_idx.add(best_ti)
+            else:
+                results.append({'ma': '', 'ten_hpt': hr['ten'], 'nd': hr['nd'], 'gia': hr['gia'],
+                                 'sl_hpt': hr['sl'], 'hoa_don': hr['ma_hd'],
+                                 'ten_tk': '', 'sl_tk': None, 'cl': None, 'status': 'hpt_no_tk'})
+
+        # Pass 3: unmatched active TK → tk_no_hpt
+        for ti in tk_pool:
+            if ti not in matched_tk:
+                if is_active(df_tk.loc[ti, sl_col_tk]):
+                    results.append(row_tk_no_hpt(df_tk.loc[ti]))
+                used_tk_idx.add(ti)
+
+    # TK còn lại (không có HPT nào khớp)
+    for ti, tr in df_tk.iterrows():
+        if ti not in used_tk_idx and is_active(tr[sl_col_tk]):
+            results.append(row_tk_no_hpt(tr))
+
+    return pd.DataFrame(results)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -330,85 +398,16 @@ def run_xnt(dfs_nx, df_xnt_raw, df_tk_raw, confirmed_override):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_kn(df_bbkn_raw, df_tk_raw, global_map, sl_col=9):
-    """
-    Gộp tổng SL nhập theo tên+nồng độ+giá (nhiều HĐ → 1 dòng).
-    Sau đó khớp với từng mã TK (đa mã theo thứ tự gần nhất).
-    """
-    df_kn = parse_bbkn_agg(df_bbkn_raw, sl_col)
+    df_kn = parse_raw_lines_bbkn(df_bbkn_raw, sl_col)
     if df_kn.empty:
         return None, "Không đọc được dữ liệu từ file BBKN"
     df_tk = parse_tk(df_tk_raw)
     if df_tk.empty:
         return None, "Không đọc được dữ liệu từ file Thống kê"
-
-    results = []; used_tk = set()
-
-    for _, kr in df_kn.iterrows():
-        kten, knd, kgia = kr['kten'], kr['knd'], kr['kgia']
-        mask_tk = (df_tk['kten']==kten)&(df_tk['knd']==knd)&(df_tk['kgia']==kgia)
-        grp_tk  = df_tk[mask_tk & ~df_tk.index.isin(used_tk)].reset_index()
-        # Tra mã từ global_map
-        ma_ref = find_ma(kten, knd, kgia, global_map)
-
-        if len(grp_tk) == 0:
-            results.append({
-                'ma': ma_ref, 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                'nhap_hpt': kr['sl_tong'], 'hoa_don': kr['hoa_don'],
-                'ten_tk': '', 'nhap_tk': None, 'cl': None, 'status': 'hpt_no_tk'
-            }); continue
-
-        if len(grp_tk) == 1:
-            tr = grp_tk.iloc[0]
-            cl = kr['sl_tong'] - tr['nhap_tk']
-            results.append({
-                'ma': tr['ma'], 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                'nhap_hpt': kr['sl_tong'], 'hoa_don': kr['hoa_don'],
-                'ten_tk': tr['ten_tk'], 'nhap_tk': tr['nhap_tk'], 'cl': cl, 'status': 'matched'
-            })
-            used_tk.add(grp_tk.iloc[0]['index'])
-        else:
-            # Nhiều mã TK: phân bổ sl_tong cho từng mã theo nhap_tk gần nhất
-            # Ưu tiên: nếu nhap_tk của 1 mã bằng sl_tong → khớp 1-1
-            exact = grp_tk[abs(grp_tk['nhap_tk'] - kr['sl_tong']) < 0.01]
-            if len(exact) >= 1:
-                tr = exact.iloc[0]
-                cl = kr['sl_tong'] - tr['nhap_tk']
-                results.append({
-                    'ma': tr['ma'], 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                    'nhap_hpt': kr['sl_tong'], 'hoa_don': kr['hoa_don'],
-                    'ten_tk': tr['ten_tk'], 'nhap_tk': tr['nhap_tk'], 'cl': cl, 'status': 'matched'
-                })
-                used_tk.add(exact.index[0])
-            else:
-                # Khớp với mã có nhap_tk > 0 gần nhất
-                pos = grp_tk[grp_tk['nhap_tk'] > 0]
-                if not pos.empty:
-                    best_j = (pos['nhap_tk'] - kr['sl_tong']).abs().idxmin()
-                    tr = grp_tk.loc[best_j]
-                    cl = kr['sl_tong'] - tr['nhap_tk']
-                    results.append({
-                        'ma': tr['ma'], 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                        'nhap_hpt': kr['sl_tong'], 'hoa_don': kr['hoa_don'],
-                        'ten_tk': tr['ten_tk'], 'nhap_tk': tr['nhap_tk'], 'cl': cl, 'status': 'matched'
-                    })
-                    used_tk.add(tr['index'])
-                else:
-                    results.append({
-                        'ma': ma_ref, 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                        'nhap_hpt': kr['sl_tong'], 'hoa_don': kr['hoa_don'],
-                        'ten_tk': '', 'nhap_tk': None, 'cl': None, 'status': 'hpt_no_tk'
-                    })
-
-    # TK có nhập, HPT không có
-    for idx, tr in df_tk.iterrows():
-        if idx not in used_tk and tr['nhap_tk'] > 0:
-            results.append({
-                'ma': tr['ma'], 'ten_hpt': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
-                'nhap_hpt': None, 'hoa_don': '',
-                'ten_tk': tr['ten_tk'], 'nhap_tk': tr['nhap_tk'], 'cl': None, 'status': 'tk_no_hpt'
-            })
-
-    return pd.DataFrame(results), None
+    df_r = match_hpt_to_tk(df_kn, df_tk, 'nhap_tk')
+    # Đổi tên cột cho giao diện / Excel
+    df_r = df_r.rename(columns={'sl_hpt': 'nhap_hpt', 'sl_tk': 'nhap_tk'})
+    return df_r, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -416,73 +415,16 @@ def run_kn(df_bbkn_raw, df_tk_raw, global_map, sl_col=9):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_kk(df_bbkk_raw, df_tk_raw, global_map, sl_col=8):
-    """
-    Gộp tổng SL kiểm kê (kể cả dòng điều chỉnh âm: Concor -0.17 + 51281.17 = 51281).
-    Khớp với tồn cuối TK theo từng mã.
-    """
-    df_kk = parse_bbkk_agg(df_bbkk_raw, sl_col)
+    df_kk = parse_raw_lines_bbkk(df_bbkk_raw, sl_col)
     if df_kk.empty:
         return None, "Không đọc được dữ liệu từ file Biên bản kiểm kê"
     df_tk = parse_tk(df_tk_raw)
     if df_tk.empty:
         return None, "Không đọc được dữ liệu từ file Thống kê"
-
-    results = []; used_tk = set()
-
-    for _, kr in df_kk.iterrows():
-        kten, knd, kgia = kr['kten'], kr['knd'], kr['kgia']
-        mask_tk = (df_tk['kten']==kten)&(df_tk['knd']==knd)&(df_tk['kgia']==kgia)
-        grp_tk  = df_tk[mask_tk & ~df_tk.index.isin(used_tk)].reset_index()
-        ma_ref  = find_ma(kten, knd, kgia, global_map)
-
-        if len(grp_tk) == 0:
-            results.append({
-                'ma': ma_ref, 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                'sl_kk': kr['sl_tong'], 'ten_tk': '', 'ton_tk': None,
-                'cl': None, 'status': 'hpt_no_tk'
-            }); continue
-
-        if len(grp_tk) == 1:
-            tr = grp_tk.iloc[0]
-            cl = kr['sl_tong'] - tr['ton_tk']
-            results.append({
-                'ma': tr['ma'], 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                'sl_kk': kr['sl_tong'], 'ten_tk': tr['ten_tk'], 'ton_tk': tr['ton_tk'],
-                'cl': cl, 'status': 'matched'
-            })
-            used_tk.add(grp_tk.iloc[0]['index'])
-        else:
-            # Nhiều mã TK: khớp theo số lượng tồn gần nhất
-            matched_j = set()
-            best_j = (grp_tk['ton_tk'] - kr['sl_tong']).abs().idxmin()
-            tr = grp_tk.loc[best_j]
-            cl = kr['sl_tong'] - tr['ton_tk']
-            results.append({
-                'ma': tr['ma'], 'ten_hpt': kr['ten'], 'nd': kr['nd'], 'gia': kr['gia'],
-                'sl_kk': kr['sl_tong'], 'ten_tk': tr['ten_tk'], 'ton_tk': tr['ton_tk'],
-                'cl': cl, 'status': 'matched'
-            })
-            used_tk.add(tr['index']); matched_j.add(best_j)
-            # Các mã TK chưa được khớp
-            for j, tr2 in grp_tk.iterrows():
-                if j in matched_j and abs(tr2['ton_tk']) >= 0.01:
-                    results.append({
-                        'ma': tr2['ma'], 'ten_hpt': '', 'nd': tr2['nd_tk'], 'gia': tr2['gia_tk'],
-                        'sl_kk': None, 'ten_tk': tr2['ten_tk'], 'ton_tk': tr2['ton_tk'],
-                        'cl': None, 'status': 'tk_no_hpt'
-                    })
-                    used_tk.add(tr2['index'])
-
-    # TK có tồn, KK không có
-    for idx, tr in df_tk.iterrows():
-        if idx not in used_tk and abs(tr['ton_tk']) >= 0.01:
-            results.append({
-                'ma': tr['ma'], 'ten_hpt': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
-                'sl_kk': None, 'ten_tk': tr['ten_tk'], 'ton_tk': tr['ton_tk'],
-                'cl': None, 'status': 'tk_no_hpt'
-            })
-
-    return pd.DataFrame(results), None
+    df_r = match_hpt_to_tk(df_kk, df_tk, 'ton_tk')
+    # Đổi tên cột cho giao diện / Excel
+    df_r = df_r.rename(columns={'sl_hpt': 'sl_kk', 'sl_tk': 'ton_tk'})
+    return df_r, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
