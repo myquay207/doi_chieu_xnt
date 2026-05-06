@@ -346,7 +346,7 @@ def run_reconciliation_xnt(files_nhap_xuat, df_xnt_raw, df_tk_raw, confirmed_ove
         else:
             for _, xr in grp_x.iterrows():
                 for _, xr in grp_x.iterrows():
-    		results.append(make_row(xr, None, 'no_tk'))
+    results.append(make_row(xr, None, 'no_tk'))
 
     for idx, tr in df_tk.iterrows():
         if idx not in used_tk:
