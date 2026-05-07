@@ -1,7 +1,7 @@
 """
 HỆ THỐNG TỰ ĐỘNG HÓA BIÊN BẢN DƯỢC – Bệnh viện Đà Nẵng
-Hỗ trợ: BBKN · XNT · Đối Chiếu Dược (XNT, Kiểm nhập, Kiểm kê)
-v6 – Gộp chung 1 app
+Hỗ trợ: BBKN · BBKK · XNT · Đối Chiếu Dược (XNT, Kiểm nhập, Kiểm kê)
+v7 – Thêm module Biên Bản Kiểm Kê (BBKK) + chọn tháng/năm báo cáo tự động
 """
 
 import io, math, copy, datetime, re, warnings
@@ -889,78 +889,414 @@ def dc_export_excel(res_xnt, res_kn, res_kk, tn):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  MODULE BBKK – Biên Bản Kiểm Kê
+# ══════════════════════════════════════════════════════════════════════════════
+import calendar
+
+def get_last_day(thang, nam):
+    """Trả về ngày cuối tháng."""
+    return calendar.monthrange(nam, thang)[1]
+
+def ten_thang_viet(thang):
+    return f"Tháng {thang}"
+
+def format_ngay_viet(ngay, thang, nam):
+    return f"ngày {ngay} tháng {thang} năm {nam}"
+
+BBKK_W = {1:5, 2:35, 3:14, 4:7.5, 5:10, 6:32, 7:11, 8:10, 9:10, 10:8, 11:10}
+BBKK_A = {1:('center','center'), 2:('left','center'), 3:('left','center'),
+          4:('center','center'), 5:('center','center'), 6:('left','center'),
+          7:('center','center'), 8:('right','center'), 9:('right','center'),
+          10:('right','center'), 11:('center','center')}
+BBKK_WRAP = {2, 3, 6}
+BBKK_NUM  = {8, 9}
+
+def bbkk_h(ws, r):
+    ml = 1
+    for c in BBKK_WRAP:
+        v = ws.cell(row=r, column=c).value
+        if not v or not isinstance(v, str): continue
+        cw = max(BBKK_W.get(c, 15) * 1.1, 1)
+        ml = max(ml, sum(max(1, math.ceil(len(ln)/cw)) for ln in v.split('\n')))
+    return max(20, min(ml * 14.3 + 4, 120))
+
+def parse_bbkk_raw(raw_df):
+    """
+    Parse dữ liệu thô BBKK từ HPT.
+    Columns in raw: 0=STT, 1=TenThuoc, 2=NongDo, 3=DVT, 4=DonGia,
+                    5=SoLo, 6=HangSX, 7=HanDung, 8=SLSoSach, 9=ThanhTien, 10=SLThucTe
+    Lọc dòng SL Thực tế = 0 (col 10); nếu col10 NaN dùng col8.
+    Trả về list of row (pandas Series)
+    """
+    drugs, skipped = [], 0
+    for _, row in raw_df.iterrows():
+        try: int(str(row[0]).strip())
+        except: continue
+        if pd.isna(row[1]) or not isinstance(row[1], str): continue
+        # Số lượng thực tế: col 10 nếu có, else col 8
+        sl_tt = row[10] if not pd.isna(row.get(10, float('nan'))) else (row[8] if not pd.isna(row[8]) else 0)
+        try: sl_tt = float(sl_tt)
+        except: sl_tt = 0
+        if sl_tt == 0:
+            skipped += 1
+            continue
+        drugs.append(row)
+    return drugs, {'drugs': len(drugs), 'skipped': skipped}
+
+def build_bbkk(tmpl_bytes, drugs, thang, nam):
+    """
+    Điền dữ liệu vào form BBKK chuẩn.
+    Tự động cập nhật tháng/năm trong tiêu đề và ngày kiểm kê.
+    """
+    wb = load_workbook(io.BytesIO(tmpl_bytes))
+    ws = wb.active
+
+    last_day = get_last_day(thang, nam)
+
+    # ── Cập nhật tiêu đề tháng/năm ──────────────────────────────────────────
+    # R3C5: "Tháng X năm YYYY"
+    ws.cell(row=3, column=5).value = f"Tháng {thang} năm {nam}"
+
+    # R10C1: dòng kiểm kê tại...
+    old_r10 = ws.cell(row=10, column=1).value or ''
+    # Thay thế toàn bộ ngày giờ trong dòng R10
+    import re as _re
+    new_r10 = _re.sub(
+        r'ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
+        f'ngày {last_day} tháng {thang} năm {nam}',
+        old_r10
+    )
+    ws.cell(row=10, column=1).value = new_r10
+
+    # ── Lấy style từ template ────────────────────────────────────────────────
+    DS = 13  # data start row (row 13 = first data row in template, rows 11-12 = headers)
+    cs = {c: gs(ws, DS, c) for c in range(1, 12)}
+    ds = {c: gs(ws, DS+1 if ws.max_row > DS else DS, c) for c in range(1, 12)}
+
+    # Lấy style từ row đầu tiên có số liệu
+    first_data_row = None
+    for r in range(DS, min(DS+5, ws.max_row+1)):
+        if ws.cell(row=r, column=1).value is not None:
+            first_data_row = r
+            break
+    if first_data_row:
+        ds = {c: gs(ws, first_data_row, c) for c in range(1, 12)}
+
+    # ── Tìm vị trí "Tổng khoản" để insert rows ──────────────────────────────
+    fs = None
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value and 'Tổng khoản' in str(cell.value):
+                fs = cell.row; break
+        if fs: break
+    if not fs: fs = DS + 185  # fallback
+
+    # Xóa dữ liệu cũ từ DS đến fs-1
+    for m in [str(mr) for mr in ws.merged_cells.ranges if DS <= mr.min_row < fs]:
+        ws.merged_cells.remove(m)
+    for r in range(DS, fs):
+        for c in range(1, 12):
+            try: ws.cell(row=r, column=c).value = None
+            except: pass
+
+    # ── Insert rows nếu cần ─────────────────────────────────────────────────
+    need = len(drugs) + 1  # +1 cho dòng Tổng khoản
+    current_space = fs - DS
+    if need > current_space:
+        ins = need - current_space
+        ws.insert_rows(fs, ins)
+        fs += ins
+
+    # ── Ghi dữ liệu ──────────────────────────────────────────────────────────
+    def wdr_kk(rn, stt, dr):
+        ten = str(dr[1]).strip() if not pd.isna(dr[1]) else ''
+        nd  = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
+        # Ghép tên + nồng độ vào cột 2 (như template gốc)
+        ten_full = f"{ten} {nd}".strip() if nd else ten
+        cols = [
+            (1,  stt,                                               'center', False, None),
+            (2,  ten_full,                                          'left',   True,  None),
+            (3,  nd,                                                'left',   False, None),
+            (4,  str(dr[3]).strip() if not pd.isna(dr[3]) else '',  'center', False, None),
+            (5,  str(dr[5]).strip() if not pd.isna(dr[5]) else '',  'center', False, None),
+            (6,  str(dr[6]).strip() if not pd.isna(dr[6]) else '',  'left',   True,  None),
+            (7,  dr[7] if isinstance(dr[7], datetime.datetime)
+                 else ('' if pd.isna(dr[7]) else dr[7]),            'center', False, 'DD/MM/YYYY'),
+            (8,  float(dr[8]) if not pd.isna(dr[8]) else 0,        'right',  False, '#,##0'),
+        ]
+        sl_tt = dr[10] if not pd.isna(dr.get(10, float('nan'))) else (dr[8] if not pd.isna(dr[8]) else 0)
+        try: sl_tt = float(sl_tt)
+        except: sl_tt = 0
+        cols.append((9, sl_tt, 'right', False, '#,##0'))
+        for col, val, ha, wrap, fmt in cols:
+            cl = ws.cell(row=rn, column=col, value=val)
+            ap(cl, ds[col])
+            cl.font = Font(name='Times New Roman', size=11)
+            cl.alignment = Alignment(horizontal=ha, vertical='center', wrap_text=wrap)
+            if fmt and val != '': cl.number_format = fmt
+        # Cột 10 (Hỏng) và 11 (Ghi chú) để trống
+        for c in (10, 11):
+            cc = ws.cell(row=rn, column=c, value='')
+            ap(cc, ds[c])
+
+    stt = 1
+    for dr in drugs:
+        wdr_kk(DS + stt - 1, stt, dr)
+        stt += 1
+
+    # ── Dòng Tổng khoản ──────────────────────────────────────────────────────
+    tr = DS + len(drugs)
+    lbl = ws.cell(row=tr, column=2, value=f'Tổng khoản: {len(drugs)} khoản')
+    lbl.font = Font(name='Times New Roman', bold=True, size=11)
+    lbl.alignment = Alignment(horizontal='left', vertical='center')
+    lbl.border = b_med()
+    ws.cell(row=tr, column=1).border = b_med()
+    for c in range(3, 12):
+        ws.cell(row=tr, column=c).border = b_med()
+    ws.row_dimensions[tr].height = 20
+
+    # ── Format vùng data ─────────────────────────────────────────────────────
+    for r in range(DS, tr):
+        ws.row_dimensions[r].height = bbkk_h(ws, r)
+        for col in range(1, 12):
+            cl = ws.cell(row=r, column=col)
+            ha, va = BBKK_A.get(col, ('left', 'center'))
+            safe_set(cl, fill=NO_FILL, border=b_thin(),
+                     font=Font(name='Times New Roman', size=11),
+                     alignment=Alignment(horizontal=ha, vertical=va, wrap_text=col in BBKK_WRAP))
+            if col in BBKK_NUM and cl.value is not None and cl.value != '':
+                cl.number_format = '#,##0'
+            if col == 7 and isinstance(cl.value, datetime.datetime):
+                cl.number_format = 'DD/MM/YYYY'
+
+    # ── Cập nhật footer: ngày ký biên bản (dòng cuối) ────────────────────────
+    # Tìm dòng có "Ngày" trong phần cuối
+    for r in range(tr+1, min(tr+15, ws.max_row+1)):
+        v = ws.cell(row=r, column=1).value
+        if v and isinstance(v, str) and 'Ngày' in v:
+            import re as _re2
+            ws.cell(row=r, column=1).value = _re2.sub(
+                r'Ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
+                f'Ngày {last_day} tháng {thang} năm {nam}',
+                v
+            )
+            break
+
+    for col, w in BBKK_W.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.page_setup.orientation = 'portrait'
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    for a, v in [('left', .5), ('right', .5), ('top', .7), ('bottom', .7),
+                 ('header', .3), ('footer', .3)]:
+        setattr(ws.page_margins, a, v)
+    ws.print_title_rows = '1:12'
+    ws.freeze_panes = ws.cell(row=DS, column=1)
+
+    out = io.BytesIO(); wb.save(out); out.seek(0)
+    return out.getvalue()
+
+
+def update_xnt_dates(tmpl_bytes, thang, nam):
+    """Cập nhật tháng/năm trong template XNT."""
+    wb = load_workbook(io.BytesIO(tmpl_bytes))
+    ws = wb.active
+    last_day = get_last_day(thang, nam)
+    import re as _re
+    for r in range(1, min(15, ws.max_row+1)):
+        for c in range(1, ws.max_column+1):
+            v = ws.cell(row=r, column=c).value
+            if not v or not isinstance(v, str): continue
+            # Thay "Tháng X năm YYYY"
+            new_v = _re.sub(r'Tháng\s+\d+\s+năm\s+\d+', f'Tháng {thang} năm {nam}', v)
+            # Thay ngày cuối tháng
+            new_v = _re.sub(r'ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
+                            f'ngày {last_day} tháng {thang} năm {nam}', new_v)
+            if new_v != v:
+                ws.cell(row=r, column=c).value = new_v
+    out = io.BytesIO(); wb.save(out); out.seek(0)
+    return out.getvalue()
+
+
+def update_bbkn_dates(tmpl_bytes, thang, nam):
+    """Cập nhật tháng/năm trong template BBKN."""
+    wb = load_workbook(io.BytesIO(tmpl_bytes))
+    ws = wb.active
+    last_day = get_last_day(thang, nam)
+    import re as _re
+    for r in range(1, min(20, ws.max_row+1)):
+        for c in range(1, ws.max_column+1):
+            v = ws.cell(row=r, column=c).value
+            if not v or not isinstance(v, str): continue
+            new_v = _re.sub(r'Tháng\s+\d+\s+năm\s+\d+', f'Tháng {thang} năm {nam}', v)
+            new_v = _re.sub(r'ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
+                            f'ngày {last_day} tháng {thang} năm {nam}', new_v)
+            if new_v != v:
+                ws.cell(row=r, column=c).value = new_v
+    out = io.BytesIO(); wb.save(out); out.seek(0)
+    return out.getvalue()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  GIAO DIỆN CHÍNH
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <div class="hero">
   <div class="badge">🏥 Bệnh viện Đà Nẵng · Khoa Dược</div>
   <h1>HỆ THỐNG TỰ ĐỘNG HÓA<br>BIÊN BẢN DƯỢC</h1>
-  <p class="sub">Biên Bản Kiểm Nhập (BBKN) &nbsp;·&nbsp; Xuất Nhập Tồn (XNT) &nbsp;·&nbsp; Đối Chiếu Dược</p>
+  <p class="sub">Biên Bản Kiểm (BBKN · BBKK) &nbsp;·&nbsp; Xuất Nhập Tồn (XNT) &nbsp;·&nbsp; Đối Chiếu Dược</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ── 3 Tab chính ───────────────────────────────────────────────────────────────
-tab_bbkn, tab_xnt_main, tab_dc = st.tabs([
-    "📋 Biên Bản Kiểm Nhập",
+tab_bienban, tab_xnt_main, tab_dc = st.tabs([
+    "📋 Biên Bản Kiểm",
     "📊 Báo Cáo XNT",
     "🔍 Đối Chiếu Dược",
 ])
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 1 – BBKN                                                           ║
+# ║  TAB 1 – BIÊN BẢN KIỂM (gộp BBKN + BBKK)                              ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-with tab_bbkn:
-    st.markdown("""<div class="tab-desc">
-    Upload <b>file dữ liệu thô BBKN từ HPT</b> (.xls/.xlsx) và <b>file form chuẩn kiểm nhập 2026</b>.<br>
-    Logic: Lọc bỏ dòng Số lượng nhập = 0 · Phân nhóm theo công ty · Tính thành tiền tự động.
+with tab_bienban:
+    st.markdown("""<div class="info-box">
+    Chọn loại biên bản cần xử lý. Mỗi biên bản có bộ chọn <b>Tháng / Năm</b> riêng —
+    hệ thống sẽ tự động điền tháng, năm và ngày cuối tháng vào đúng vị trí trong form.
     </div>""", unsafe_allow_html=True)
 
-    col1, col2 = st.columns(2)
-    with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
-    with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập 2026", type=["xlsx"], key="bbkn_tpl")
-    st.markdown("<hr>", unsafe_allow_html=True)
+    sub_bbkn, sub_bbkk = st.tabs([
+        "📥 Kiểm Nhập (BBKN)",
+        "🔎 Kiểm Kê (BBKK)",
+    ])
 
-    ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
-    if st.button("⚡ Bắt đầu xử lý BBKN", disabled=not ready_bbkn, key="btn_bbkn"):
-        with st.spinner("Đang xử lý BBKN..."):
-            try:
-                raw_b = raw_file_bbkn.read()
-                if raw_file_bbkn.name.endswith('.xls'):
-                    try:    raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None,engine='xlrd')
-                    except: raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
-                else:
-                    raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
-                tpl_b = tpl_file_bbkn.read()
-                companies, stats = parse_companies(raw_df, 9)
-                if not companies:
-                    st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
-                    st.stop()
-                result = build_bbkn(tpl_b, companies)
-                st.session_state.update(bbkn_result=result, bbkn_stats=stats, bbkn_done=True)
-            except Exception as e:
-                st.error(f"❌ Lỗi: {e}"); st.exception(e)
-
-    if st.session_state.get("bbkn_done"):
-        stats  = st.session_state["bbkn_stats"]
-        result = st.session_state["bbkn_result"]
-        now    = datetime.datetime.now()
-        fname  = f"BBKN_T{now.month}_{now.year}_HoanChinh.xlsx"
-        st.markdown(f"""
-        <div class="ok-box">
-          <div class="icon">✅</div>
-          <h3>Xử lý BBKN hoàn tất!</h3>
-          <p>File sẵn sàng — tải về và in ký hội đồng.</p>
-        </div>
-        <div class="stat-grid">
-          <div class="stat-card"><div class="num">{stats['companies']}</div><div class="lbl">Công ty cung cấp</div></div>
-          <div class="stat-card"><div class="num">{stats['drugs']}</div><div class="lbl">Mặt hàng có nhập</div></div>
-          <div class="stat-card"><div class="num">{stats['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
+    # ── SUB-TAB BBKN ──────────────────────────────────────────────────────────
+    with sub_bbkn:
+        st.markdown("""<div class="tab-desc">
+        Upload <b>file dữ liệu thô BBKN từ HPT</b> (.xls/.xlsx) và <b>file form chuẩn kiểm nhập</b>.<br>
+        Logic: Lọc bỏ dòng Số lượng nhập = 0 · Phân nhóm theo công ty · Tính thành tiền tự động.
         </div>""", unsafe_allow_html=True)
-        st.download_button(label=f"⬇️ Tải File BBKN – {fname}", data=result, file_name=fname,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkn")
-        st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Ngang · Fit All Columns on One Page</b>.
-        Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
+
+        bbkn_ta, bbkn_tb = st.columns(2)
+        with bbkn_ta:
+            bbkn_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
+                format_func=lambda x: f"Tháng {x}", key="bbkn_thang")
+        with bbkn_tb:
+            bbkn_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
+                value=2026, key="bbkn_nam")
+
+        col1, col2 = st.columns(2)
+        with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
+        with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xlsx"], key="bbkn_tpl")
+        st.markdown("<hr>", unsafe_allow_html=True)
+
+        ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
+        if st.button("⚡ Bắt đầu xử lý BBKN", disabled=not ready_bbkn, key="btn_bbkn"):
+            with st.spinner("Đang xử lý BBKN..."):
+                try:
+                    raw_b = raw_file_bbkn.read()
+                    if raw_file_bbkn.name.endswith('.xls'):
+                        try:    raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None,engine='xlrd')
+                        except: raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
+                    else:
+                        raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
+                    tpl_b = tpl_file_bbkn.read()
+                    # Cập nhật tháng/năm trong form trước khi build
+                    tpl_b = update_bbkn_dates(tpl_b, bbkn_thang, bbkn_nam)
+                    companies, stats = parse_companies(raw_df, 9)
+                    if not companies:
+                        st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
+                        st.stop()
+                    result = build_bbkn(tpl_b, companies)
+                    st.session_state.update(bbkn_result=result, bbkn_stats=stats,
+                                            bbkn_done=True, bbkn_thang=bbkn_thang, bbkn_nam=bbkn_nam)
+                except Exception as e:
+                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
+
+        if st.session_state.get("bbkn_done"):
+            stats  = st.session_state["bbkn_stats"]
+            result = st.session_state["bbkn_result"]
+            _t = st.session_state.get("bbkn_thang", bbkn_thang)
+            _n = st.session_state.get("bbkn_nam", bbkn_nam)
+            fname  = f"BBKN_T{_t}_{_n}_HoanChinh.xlsx"
+            st.markdown(f"""
+            <div class="ok-box">
+              <div class="icon">✅</div>
+              <h3>Xử lý BBKN hoàn tất – Tháng {_t}/{_n}!</h3>
+              <p>File sẵn sàng — tải về và in ký hội đồng.</p>
+            </div>
+            <div class="stat-grid">
+              <div class="stat-card"><div class="num">{stats['companies']}</div><div class="lbl">Công ty cung cấp</div></div>
+              <div class="stat-card"><div class="num">{stats['drugs']}</div><div class="lbl">Mặt hàng có nhập</div></div>
+              <div class="stat-card"><div class="num">{stats['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
+            </div>""", unsafe_allow_html=True)
+            st.download_button(label=f"⬇️ Tải File BBKN – {fname}", data=result, file_name=fname,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkn")
+            st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Ngang · Fit All Columns on One Page</b>.
+            Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
+
+    # ── SUB-TAB BBKK ──────────────────────────────────────────────────────────
+    with sub_bbkk:
+        st.markdown("""<div class="tab-desc">
+        Upload <b>file dữ liệu thô BBKK từ HPT</b> (.xlsx) và <b>file form chuẩn kiểm kê</b>.<br>
+        Logic: Lọc bỏ dòng Số lượng thực tế = 0 · Điền đủ tên, lô, hạn dùng, SL sổ sách & thực tế.
+        </div>""", unsafe_allow_html=True)
+
+        bbkk_ta, bbkk_tb = st.columns(2)
+        with bbkk_ta:
+            bbkk_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
+                format_func=lambda x: f"Tháng {x}", key="bbkk_thang")
+        with bbkk_tb:
+            bbkk_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
+                value=2026, key="bbkk_nam")
+
+        col1k, col2k = st.columns(2)
+        with col1k: raw_file_bbkk = st.file_uploader("📂 File dữ liệu thô HPT (BBKK)", type=["xls","xlsx"], key="bbkk_raw")
+        with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xlsx"], key="bbkk_tpl")
+        st.markdown("<hr>", unsafe_allow_html=True)
+
+        ready_bbkk = raw_file_bbkk is not None and tpl_file_bbkk is not None
+        if st.button("⚡ Bắt đầu xử lý BBKK", disabled=not ready_bbkk, key="btn_bbkk"):
+            with st.spinner("Đang xử lý BBKK..."):
+                try:
+                    raw_b_kk = raw_file_bbkk.read()
+                    if raw_file_bbkk.name.endswith('.xls'):
+                        try:    raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None,engine='xlrd')
+                        except: raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
+                    else:
+                        raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
+                    tpl_b_kk = tpl_file_bbkk.read()
+                    drugs_kk, stats_kk = parse_bbkk_raw(raw_df_kk)
+                    if not drugs_kk:
+                        st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
+                        st.stop()
+                    result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam)
+                    st.session_state.update(bbkk_result=result_kk, bbkk_stats=stats_kk,
+                                            bbkk_done=True, bbkk_thang=bbkk_thang, bbkk_nam=bbkk_nam)
+                except Exception as e:
+                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
+
+        if st.session_state.get("bbkk_done"):
+            stats_kk2  = st.session_state["bbkk_stats"]
+            result_kk2 = st.session_state["bbkk_result"]
+            _tk = st.session_state.get("bbkk_thang", bbkk_thang)
+            _nk = st.session_state.get("bbkk_nam", bbkk_nam)
+            fname_kk = f"BBKK_T{_tk}_{_nk}_HoanChinh.xlsx"
+            st.markdown(f"""
+            <div class="ok-box">
+              <div class="icon">✅</div>
+              <h3>Xử lý BBKK hoàn tất – Tháng {_tk}/{_nk}!</h3>
+              <p>File sẵn sàng — tải về, in và ký hội đồng kiểm kê.</p>
+            </div>
+            <div class="stat-grid">
+              <div class="stat-card"><div class="num">{stats_kk2['drugs']}</div><div class="lbl">Mặt hàng có tồn</div></div>
+              <div class="stat-card"><div class="num">{stats_kk2['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
+            </div>""", unsafe_allow_html=True)
+            st.download_button(label=f"⬇️ Tải File BBKK – {fname_kk}", data=result_kk2, file_name=fname_kk,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkk")
+            st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Đứng</b>.
+            Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
@@ -968,13 +1304,21 @@ with tab_bbkn:
 # ╚══════════════════════════════════════════════════════════════════════════╝
 with tab_xnt_main:
     st.markdown("""<div class="tab-desc">
-    Upload <b>file dữ liệu thô XNT từ HPT</b> (.xlsx) và <b>file BBXNT-2026.xlsx</b> làm form chuẩn.<br>
+    Upload <b>file dữ liệu thô XNT từ HPT</b> (.xlsx) và <b>file BBXNT form chuẩn</b>.<br>
     Logic: Giữ dòng có Tồn cuối ≠ 0 · Phân nhóm theo công ty · Thành tiền = Đơn giá × Tồn cuối.
     </div>""", unsafe_allow_html=True)
 
+    xnt_ta, xnt_tb = st.columns(2)
+    with xnt_ta:
+        xnt_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
+            format_func=lambda x: f"Tháng {x}", key="xnt_thang")
+    with xnt_tb:
+        xnt_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
+            value=2026, key="xnt_nam")
+
     col1x, col2x = st.columns(2)
     with col1x: raw_file_xnt = st.file_uploader("📂 File dữ liệu thô HPT (XNT)", type=["xlsx"], key="xnt_raw")
-    with col2x: tpl_file_xnt = st.file_uploader("📄 File BBXNT-2026.xlsx (form chuẩn)", type=["xlsx"], key="xnt_tpl")
+    with col2x: tpl_file_xnt = st.file_uploader("📄 File form chuẩn XNT", type=["xlsx"], key="xnt_tpl")
     st.markdown("<hr>", unsafe_allow_html=True)
 
     ready_xnt_main = raw_file_xnt is not None and tpl_file_xnt is not None
@@ -983,23 +1327,27 @@ with tab_xnt_main:
             try:
                 raw_df2 = pd.read_excel(io.BytesIO(raw_file_xnt.read()), sheet_name=0, header=None)
                 tpl_b2  = tpl_file_xnt.read()
+                # Cập nhật tháng/năm trong form
+                tpl_b2 = update_xnt_dates(tpl_b2, xnt_thang, xnt_nam)
                 companies2, stats2 = parse_companies(raw_df2, 12)
                 if not companies2:
                     st.error("❌ Không tìm thấy dữ liệu hợp lệ."); st.stop()
                 result2 = build_xnt(tpl_b2, companies2)
-                st.session_state.update(xnt_main_result=result2, xnt_main_stats=stats2, xnt_main_done=True)
+                st.session_state.update(xnt_main_result=result2, xnt_main_stats=stats2,
+                                        xnt_main_done=True, xnt_main_thang=xnt_thang, xnt_main_nam=xnt_nam)
             except Exception as e:
                 st.error(f"❌ Lỗi: {e}"); st.exception(e)
 
     if st.session_state.get("xnt_main_done"):
         stats2  = st.session_state["xnt_main_stats"]
         result2 = st.session_state["xnt_main_result"]
-        now     = datetime.datetime.now()
-        fname2  = f"XNT_T{now.month}_{now.year}_HoanChinh.xlsx"
+        _tx = st.session_state.get("xnt_main_thang", xnt_thang)
+        _nx = st.session_state.get("xnt_main_nam", xnt_nam)
+        fname2  = f"XNT_T{_tx}_{_nx}_HoanChinh.xlsx"
         st.markdown(f"""
         <div class="ok-box">
           <div class="icon">✅</div>
-          <h3>Xử lý XNT hoàn tất!</h3>
+          <h3>Xử lý XNT hoàn tất – Tháng {_tx}/{_nx}!</h3>
           <p>File sẵn sàng — tải về và kiểm tra.</p>
         </div>
         <div class="stat-grid">
