@@ -17,148 +17,190 @@ warnings.filterwarnings("ignore")
 st.set_page_config(
     page_title="Biên Bản Dược – BV Đà Nẵng",
     page_icon="🏥",
-    layout="centered",
+    layout="wide",
 )
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&family=Mulish:wght@300;400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,300;0,400;0,600;0,700;0,800;1,300&display=swap');
 
 /* ── Base ── */
 html, body, [class*="css"] {
-  font-family: 'Mulish', sans-serif;
-  color: #1a2332;
+  font-family: 'Be Vietnam Pro', sans-serif;
 }
 
-/* ── Hero Banner ── */
-.hero {
-  position: relative;
-  overflow: hidden;
-  background: linear-gradient(135deg, #0b1f3a 0%, #0f3460 45%, #16528a 80%, #0e7abf 100%);
-  border-radius: 20px;
-  padding: 36px 40px 30px;
-  margin-bottom: 28px;
-  color: white;
-  box-shadow: 0 12px 40px rgba(11,31,58,.35), 0 2px 0 rgba(255,255,255,.08) inset;
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, #0b1f3a 0%, #0f3460 60%, #0e4d8a 100%) !important;
+  border-right: none !important;
 }
-.hero::before {
-  content: '';
-  position: absolute;
-  top: -60px; right: -60px;
-  width: 280px; height: 280px;
-  background: radial-gradient(circle, rgba(255,255,255,.07) 0%, transparent 70%);
-  border-radius: 50%;
+[data-testid="stSidebar"] * { color: white !important; }
+[data-testid="stSidebar"] .sidebar-logo {
+  text-align: center;
+  padding: 8px 0 20px;
+  border-bottom: 1px solid rgba(255,255,255,.12);
+  margin-bottom: 20px;
 }
-.hero::after {
-  content: '';
-  position: absolute;
-  bottom: -40px; left: 30%;
-  width: 380px; height: 120px;
-  background: radial-gradient(ellipse, rgba(14,122,191,.35) 0%, transparent 70%);
-  border-radius: 50%;
+[data-testid="stSidebar"] .sidebar-logo .logo-icon {
+  font-size: 2.4rem;
+  line-height: 1;
 }
-.hero .badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: rgba(255,255,255,.14);
-  border: 1px solid rgba(255,255,255,.22);
-  border-radius: 30px;
-  padding: 4px 14px;
-  font-size: .72rem;
+[data-testid="stSidebar"] .sidebar-logo .logo-name {
+  font-size: .78rem;
   font-weight: 700;
-  letter-spacing: 1.4px;
-  margin-bottom: 14px;
+  letter-spacing: 1.2px;
   text-transform: uppercase;
-  backdrop-filter: blur(4px);
+  opacity: .9;
+  margin-top: 6px;
 }
-.hero h1 {
-  font-family: 'Montserrat', sans-serif;
-  font-size: 1.75rem;
-  font-weight: 800;
-  margin: 0 0 8px;
-  line-height: 1.25;
-  letter-spacing: -.3px;
+[data-testid="stSidebar"] .sidebar-logo .logo-sub {
+  font-size: .68rem;
+  opacity: .55;
+  margin-top: 2px;
 }
-.hero h1 span {
-  color: #7dd3fc;
+[data-testid="stSidebar"] .nav-section-title {
+  font-size: .65rem;
+  font-weight: 700;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  opacity: .45;
+  padding: 0 4px;
+  margin-bottom: 6px;
 }
-.hero .sub {
-  font-size: .9rem;
-  font-weight: 300;
-  opacity: .8;
-  margin: 0;
-  letter-spacing: .2px;
-}
-.hero .dots {
-  display: inline-block;
-  width: 5px; height: 5px;
-  background: rgba(255,255,255,.4);
-  border-radius: 50%;
-  margin: 0 8px;
-  vertical-align: middle;
-}
-.hero-pills {
+[data-testid="stSidebar"] .nav-item {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 18px;
-}
-.hero-pill {
-  background: rgba(255,255,255,.1);
-  border: 1px solid rgba(255,255,255,.18);
-  border-radius: 8px;
-  padding: 5px 12px;
-  font-size: .74rem;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  transition: background .15s;
+  font-size: .88rem;
   font-weight: 600;
-  letter-spacing: .5px;
-  color: rgba(255,255,255,.9);
+  opacity: .75;
+  border: 1px solid transparent;
+}
+[data-testid="stSidebar"] .nav-item:hover {
+  background: rgba(255,255,255,.1);
+  opacity: 1;
+}
+[data-testid="stSidebar"] .nav-item.active {
+  background: rgba(255,255,255,.15);
+  border-color: rgba(255,255,255,.2);
+  opacity: 1;
+}
+[data-testid="stSidebar"] .nav-item .nav-icon { font-size: 1.1rem; }
+[data-testid="stSidebar"] .sidebar-footer {
+  position: absolute;
+  bottom: 20px;
+  left: 0; right: 0;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255,255,255,.1);
+  font-size: .7rem;
+  opacity: .4;
+  text-align: center;
+  line-height: 1.6;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label {
+  background: rgba(255,255,255,.07) !important;
+  border: 1px solid rgba(255,255,255,.12) !important;
+  border-radius: 10px !important;
+  padding: 10px 14px !important;
+  margin-bottom: 5px !important;
+  font-size: .88rem !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: background .15s !important;
+  display: flex !important;
+  align-items: center !important;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+  background: rgba(255,255,255,.14) !important;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] [aria-checked="true"] + label,
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-selected="true"] {
+  background: rgba(255,255,255,.18) !important;
+  border-color: rgba(255,255,255,.3) !important;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] > div {
+  flex-direction: column;
+  gap: 0;
+}
+/* Hide radio circle, style as button */
+[data-testid="stSidebar"] [data-testid="stRadio"] [type="radio"] { display: none !important; }
+[data-testid="stSidebar"] .stMarkdown p { opacity: .7 !important; font-size: .8rem !important; }
+
+/* ── Page header ── */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 24px;
+  background: white;
+  border-radius: 16px;
+  border: 1px solid #e8eef6;
+  margin-bottom: 24px;
+  box-shadow: 0 2px 12px rgba(15,52,96,.06);
+}
+.page-header .ph-icon {
+  font-size: 2rem;
+  background: linear-gradient(135deg, #0b1f3a, #1a5ba0);
+  border-radius: 12px;
+  width: 52px; height: 52px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.page-header .ph-title {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #0b1f3a;
+  line-height: 1.2;
+  letter-spacing: -.2px;
+}
+.page-header .ph-sub {
+  font-size: .8rem;
+  color: #7b8fa8;
+  margin-top: 3px;
+  font-weight: 400;
 }
 
-/* ── Tabs styling ── */
-[data-testid="stTabs"] [role="tablist"] {
-  gap: 4px;
-  border-bottom: 2px solid #e4eaf3;
-  padding-bottom: 0;
+/* ── Sub-nav pills (for sub-pages) ── */
+.subnav {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
 }
-[data-testid="stTabs"] button[role="tab"] {
-  font-family: 'Montserrat', sans-serif !important;
-  font-weight: 600 !important;
-  font-size: .82rem !important;
-  letter-spacing: .3px;
-  color: #64748b !important;
-  border-radius: 8px 8px 0 0 !important;
-  padding: 8px 16px !important;
-  transition: all .2s;
+.subnav-pill {
+  padding: 7px 16px;
+  border-radius: 20px;
+  font-size: .8rem;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1.5px solid #dde5f0;
+  background: white;
+  color: #5a6e8a;
+  letter-spacing: .2px;
+  transition: all .15s;
 }
-[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
-  color: #0f3460 !important;
-  background: #eff6ff !important;
-  border-bottom: 2px solid #0f3460 !important;
+.subnav-pill.active {
+  background: #0f3460;
+  border-color: #0f3460;
+  color: white;
 }
 
 /* ── Info / desc boxes ── */
-.tab-desc {
-  background: linear-gradient(to right, #eff6ff, #f8fbff);
-  border-left: 4px solid #2b6cb0;
-  border-radius: 0 12px 12px 0;
-  padding: 13px 18px;
-  margin: 14px 0 20px;
-  font-size: .87rem;
-  color: #1e3a5f;
-  line-height: 1.7;
-  box-shadow: 0 1px 6px rgba(43,108,176,.08);
-}
-.info-box {
+.tab-desc, .info-box {
   background: linear-gradient(to right, #eff6ff, #f8fbff);
   border-left: 4px solid #2b6cb0;
   border-radius: 0 12px 12px 0;
   padding: 12px 18px;
-  margin: 10px 0 18px;
-  font-size: .86rem;
+  margin: 0 0 18px;
+  font-size: .87rem;
   color: #1e3a5f;
-  line-height: 1.75;
-  box-shadow: 0 1px 6px rgba(43,108,176,.08);
+  line-height: 1.7;
+  box-shadow: 0 1px 6px rgba(43,108,176,.07);
 }
 .warn-box {
   background: linear-gradient(to right, #fffbeb, #fefce8);
@@ -209,8 +251,7 @@ html, body, [class*="css"] {
   border-radius: 14px;
   padding: 18px 14px;
   text-align: center;
-  box-shadow: 0 2px 12px rgba(15,52,96,.07);
-  transition: transform .2s, box-shadow .2s;
+  box-shadow: 0 2px 10px rgba(15,52,96,.06);
   position: relative;
   overflow: hidden;
 }
@@ -219,21 +260,19 @@ html, body, [class*="css"] {
   position: absolute;
   top: 0; left: 0; right: 0;
   height: 3px;
-  background: linear-gradient(90deg, #0f3460, #2b6cb0);
-  border-radius: 14px 14px 0 0;
+  background: linear-gradient(90deg, #0f3460, #2b7ac8);
 }
 .stat-card .num {
-  font-family: 'Montserrat', sans-serif;
-  font-size: 1.9rem;
+  font-size: 1.85rem;
   font-weight: 800;
   color: #0f3460;
   line-height: 1;
 }
 .stat-card .lbl {
-  font-size: .73rem;
+  font-size: .72rem;
   color: #6b7a96;
   margin-top: 6px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: .3px;
   text-transform: uppercase;
 }
@@ -243,96 +282,71 @@ html, body, [class*="css"] {
   background: linear-gradient(135deg, #f0fdf4, #dcfce7);
   border: 1.5px solid #6ee7b7;
   border-radius: 16px;
-  padding: 22px 24px;
-  margin: 18px 0;
+  padding: 20px 24px;
+  margin: 16px 0;
   text-align: center;
   box-shadow: 0 4px 16px rgba(22,163,74,.1);
 }
-.ok-box .icon { font-size: 2.2rem; }
+.ok-box .icon { font-size: 2rem; }
 .ok-box h3 {
-  font-family: 'Montserrat', sans-serif;
   color: #14532d;
-  margin: 8px 0 5px;
-  font-size: 1.05rem;
+  margin: 6px 0 4px;
+  font-size: 1rem;
   font-weight: 700;
 }
-.ok-box p { color: #15803d; font-size: .86rem; margin: 0; }
+.ok-box p { color: #15803d; font-size: .84rem; margin: 0; }
 
-/* ── Upload area ── */
+/* ── Upload ── */
 [data-testid="stFileUploader"] {
   border: 2px dashed #93c5fd !important;
-  border-radius: 14px !important;
-  background: linear-gradient(135deg, #f0f7ff, #f8fbff) !important;
-  transition: border-color .2s;
-}
-[data-testid="stFileUploader"]:hover {
-  border-color: #2b6cb0 !important;
+  border-radius: 12px !important;
+  background: #f5f9ff !important;
 }
 
 /* ── Buttons ── */
 .stButton > button {
-  background: linear-gradient(135deg, #0b1f3a 0%, #0f3460 50%, #1a5ba0 100%) !important;
+  background: linear-gradient(135deg, #0b1f3a 0%, #0f3460 60%, #1a5ba0 100%) !important;
   color: white !important;
-  font-family: 'Montserrat', sans-serif !important;
   font-weight: 700 !important;
-  font-size: .9rem !important;
-  letter-spacing: .5px !important;
+  font-size: .88rem !important;
+  letter-spacing: .6px !important;
   border: none !important;
-  border-radius: 12px !important;
-  padding: 13px 0 !important;
+  border-radius: 10px !important;
+  padding: 12px 0 !important;
   width: 100% !important;
-  box-shadow: 0 4px 18px rgba(11,31,58,.3), 0 1px 0 rgba(255,255,255,.1) inset !important;
-  transition: all .2s !important;
   text-transform: uppercase !important;
+  box-shadow: 0 4px 16px rgba(11,31,58,.25) !important;
+  transition: all .2s !important;
+  font-family: 'Be Vietnam Pro', sans-serif !important;
 }
-.stButton > button:hover {
+.stButton > button:hover:not(:disabled) {
   transform: translateY(-1px) !important;
-  box-shadow: 0 7px 24px rgba(11,31,58,.35) !important;
+  box-shadow: 0 7px 22px rgba(11,31,58,.3) !important;
 }
 [data-testid="stDownloadButton"] > button {
-  background: linear-gradient(135deg, #14532d 0%, #166534 50%, #15803d 100%) !important;
+  background: linear-gradient(135deg, #14532d, #16a34a) !important;
   color: white !important;
-  font-family: 'Montserrat', sans-serif !important;
   font-weight: 700 !important;
-  font-size: .95rem !important;
+  font-size: .92rem !important;
   letter-spacing: .5px !important;
   border: none !important;
-  border-radius: 12px !important;
-  padding: 15px 0 !important;
-  width: 100% !important;
-  box-shadow: 0 4px 18px rgba(20,83,45,.3) !important;
-  text-transform: uppercase !important;
-}
-
-/* ── Selectbox & number input ── */
-[data-testid="stSelectbox"] > div > div,
-[data-testid="stNumberInput"] > div > div > input {
   border-radius: 10px !important;
-  border-color: #cbd5e1 !important;
-  font-family: 'Mulish', sans-serif !important;
+  padding: 14px 0 !important;
+  width: 100% !important;
+  text-transform: uppercase !important;
+  box-shadow: 0 4px 16px rgba(20,83,45,.25) !important;
+  font-family: 'Be Vietnam Pro', sans-serif !important;
 }
 
-/* ── Dataframe ── */
-[data-testid="stDataFrame"] {
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  overflow: hidden;
+/* ── Main content area padding ── */
+.block-container {
+  padding-top: 28px !important;
+  padding-left: 32px !important;
+  padding-right: 32px !important;
+  max-width: 100% !important;
 }
 
-/* ── Spinner text ── */
-[data-testid="stSpinner"] p {
-  font-family: 'Mulish', sans-serif !important;
-  color: #0f3460 !important;
-}
-
-/* ── Divider ── */
-hr {
-  border: none;
-  border-top: 1px solid #e8eef6;
-  margin: 22px 0;
-}
-
-/* ── Hide Streamlit chrome ── */
+hr { border: none; border-top: 1px solid #e8eef6; margin: 22px 0; }
 #MainMenu, footer { visibility: hidden; }
 header[data-testid="stHeader"] { background: transparent; }
 </style>
@@ -1635,215 +1649,242 @@ def update_bbkn_dates(tmpl_bytes, thang, nam):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  GIAO DIỆN CHÍNH
+#  SIDEBAR NAVIGATION
 # ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="hero">
-  <div class="badge">🏥 Bệnh viện Đà Nẵng &nbsp;·&nbsp; Khoa Dược</div>
-  <h1>HỆ THỐNG TỰ ĐỘNG HÓA<br><span>BIÊN BẢN DƯỢC</span></h1>
-  <p class="sub">Tự động hóa quy trình lập biên bản — chính xác, nhanh chóng, đúng chuẩn</p>
-  <div class="hero-pills">
-    <div class="hero-pill">📥 Kiểm Nhập (BBKN)</div>
-    <div class="hero-pill">🔎 Kiểm Kê (BBKK)</div>
-    <div class="hero-pill">📊 Xuất Nhập Tồn (XNT)</div>
-    <div class="hero-pill">🔍 Đối Chiếu Dược</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+with st.sidebar:
+    st.markdown("""
+    <div class="sidebar-logo">
+      <div class="logo-icon">🏥</div>
+      <div class="logo-name">Khoa Dược</div>
+      <div class="logo-sub">Bệnh viện Đà Nẵng</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-# ── 3 Tab chính ───────────────────────────────────────────────────────────────
-tab_bienban, tab_xnt_main, tab_dc = st.tabs([
-    "📋 Biên Bản Kiểm",
-    "📊 Báo Cáo XNT",
-    "🔍 Đối Chiếu Dược",
-])
+    st.markdown('<div class="nav-section-title">CHỨC NĂNG</div>', unsafe_allow_html=True)
+
+    page = st.radio(
+        label="",
+        options=[
+            "📥  Kiểm Nhập (BBKN)",
+            "🔎  Kiểm Kê (BBKK)",
+            "📊  Báo Cáo XNT",
+            "🔍  Đối Chiếu Dược",
+        ],
+        key="sidebar_page",
+        label_visibility="collapsed",
+    )
+
+    st.markdown("""
+    <div class="sidebar-footer">
+      Hệ thống Tự động hóa Biên bản Dược<br>
+      v9.7 · Khoa Dược – BV Đà Nẵng
+    </div>
+    """, unsafe_allow_html=True)
 
 
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 1 – BIÊN BẢN KIỂM (gộp BBKN + BBKK)                              ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-with tab_bienban:
-    st.markdown("""<div class="info-box">
-    Chọn loại biên bản cần xử lý. Mỗi biên bản có bộ chọn <b>Tháng / Năm</b> riêng —
-    hệ thống sẽ tự động điền tháng, năm và ngày cuối tháng vào đúng vị trí trong form.
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: BBKN
+# ══════════════════════════════════════════════════════════════════════════════
+if page == "📥  Kiểm Nhập (BBKN)":
+    st.markdown("""
+    <div class="page-header">
+      <div class="ph-icon">📥</div>
+      <div>
+        <div class="ph-title">Biên Bản Kiểm Nhập (BBKN)</div>
+        <div class="ph-sub">Tự động điền form kiểm nhập từ dữ liệu thô HPT · Phân nhóm theo công ty · Tính thành tiền</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""<div class="tab-desc">
+    Upload <b>file dữ liệu thô BBKN từ HPT</b> (.xls/.xlsx) và <b>file form chuẩn kiểm nhập</b>.<br>
+    Logic: Lọc bỏ dòng Số lượng nhập = 0 · Phân nhóm theo công ty · Tính thành tiền tự động.
     </div>""", unsafe_allow_html=True)
 
-    sub_bbkn, sub_bbkk = st.tabs([
-        "📥 Kiểm Nhập (BBKN)",
-        "🔎 Kiểm Kê (BBKK)",
-    ])
+    bbkn_ta, bbkn_tb = st.columns(2)
+    with bbkn_ta:
+        bbkn_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
+            format_func=lambda x: f"Tháng {x}", key="bbkn_thang")
+    with bbkn_tb:
+        bbkn_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
+            value=2026, key="bbkn_nam")
 
-    # ── SUB-TAB BBKN ──────────────────────────────────────────────────────────
-    with sub_bbkn:
-        st.markdown("""<div class="tab-desc">
-        Upload <b>file dữ liệu thô BBKN từ HPT</b> (.xls/.xlsx) và <b>file form chuẩn kiểm nhập</b>.<br>
-        Logic: Lọc bỏ dòng Số lượng nhập = 0 · Phân nhóm theo công ty · Tính thành tiền tự động.
+    col1, col2 = st.columns(2)
+    with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
+    with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xls","xlsx"], key="bbkn_tpl")
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
+    if st.button("⚡ Bắt đầu xử lý BBKN", disabled=not ready_bbkn, key="btn_bbkn"):
+        with st.spinner("Đang xử lý BBKN..."):
+            try:
+                raw_b = raw_file_bbkn.read()
+                if raw_file_bbkn.name.endswith('.xls'):
+                    try:    raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None,engine='xlrd')
+                    except: raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
+                else:
+                    raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
+                tpl_b = tpl_file_bbkn.read()
+                if tpl_file_bbkn.name.endswith('.xls'):
+                    import xlrd, openpyxl as _oxl
+                    _xwb = xlrd.open_workbook(file_contents=tpl_b)
+                    _xws = _xwb.sheet_by_index(0)
+                    _nwb = _oxl.Workbook(); _nws = _nwb.active
+                    for _r in range(_xws.nrows):
+                        for _c in range(_xws.ncols):
+                            _nws.cell(row=_r+1,column=_c+1,value=_xws.cell_value(_r,_c))
+                    _tb=io.BytesIO(); _nwb.save(_tb); tpl_b=_tb.getvalue()
+                tpl_b = update_bbkn_dates(tpl_b, bbkn_thang, bbkn_nam)
+                companies, stats = parse_companies(raw_df, 9)
+                if not companies:
+                    st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
+                    st.stop()
+                result, debug_rows_bbkn = build_bbkn(tpl_b, companies)
+                st.session_state['bbkn_result']      = result
+                st.session_state['bbkn_stats']       = stats
+                st.session_state['bbkn_done']        = True
+                st.session_state['bbkn_thang_val']   = bbkn_thang
+                st.session_state['bbkn_nam_val']     = bbkn_nam
+                st.session_state['bbkn_debug_rows']  = debug_rows_bbkn
+            except Exception as e:
+                st.error(f"❌ Lỗi: {e}"); st.exception(e)
+
+    if st.session_state.get("bbkn_done"):
+        stats  = st.session_state["bbkn_stats"]
+        result = st.session_state["bbkn_result"]
+        _t = st.session_state.get("bbkn_thang_val", bbkn_thang)
+        _n = st.session_state.get("bbkn_nam_val",   bbkn_nam)
+        fname  = f"BBKN_T{_t}_{_n}_HoanChinh.xlsx"
+        st.markdown(f"""
+        <div class="ok-box">
+          <div class="icon">✅</div>
+          <h3>Xử lý BBKN hoàn tất – Tháng {_t}/{_n}!</h3>
+          <p>File sẵn sàng — tải về và in ký hội đồng.</p>
+        </div>
+        <div class="stat-grid">
+          <div class="stat-card"><div class="num">{stats['companies']}</div><div class="lbl">Công ty cung cấp</div></div>
+          <div class="stat-card"><div class="num">{stats['drugs']}</div><div class="lbl">Mặt hàng có nhập</div></div>
+          <div class="stat-card"><div class="num">{stats['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
         </div>""", unsafe_allow_html=True)
-
-        bbkn_ta, bbkn_tb = st.columns(2)
-        with bbkn_ta:
-            bbkn_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
-                format_func=lambda x: f"Tháng {x}", key="bbkn_thang")
-        with bbkn_tb:
-            bbkn_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
-                value=2026, key="bbkn_nam")
-
-        col1, col2 = st.columns(2)
-        with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
-        with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xls","xlsx"], key="bbkn_tpl")
-        st.markdown("<hr>", unsafe_allow_html=True)
-
-        ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
-        if st.button("⚡ Bắt đầu xử lý BBKN", disabled=not ready_bbkn, key="btn_bbkn"):
-            with st.spinner("Đang xử lý BBKN..."):
-                try:
-                    raw_b = raw_file_bbkn.read()
-                    if raw_file_bbkn.name.endswith('.xls'):
-                        try:    raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None,engine='xlrd')
-                        except: raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
-                    else:
-                        raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
-                    tpl_b = tpl_file_bbkn.read()
-                    # Nếu form chuẩn là .xls thì convert sang xlsx bytes
-                    if tpl_file_bbkn.name.endswith('.xls'):
-                        import xlrd, openpyxl as _oxl
-                        _xwb = xlrd.open_workbook(file_contents=tpl_b)
-                        _xws = _xwb.sheet_by_index(0)
-                        _nwb = _oxl.Workbook(); _nws = _nwb.active
-                        for _r in range(_xws.nrows):
-                            for _c in range(_xws.ncols):
-                                _nws.cell(row=_r+1,column=_c+1,value=_xws.cell_value(_r,_c))
-                        _tb=io.BytesIO(); _nwb.save(_tb); tpl_b=_tb.getvalue()
-                    # Cập nhật tháng/năm trong form trước khi build
-                    tpl_b = update_bbkn_dates(tpl_b, bbkn_thang, bbkn_nam)
-                    companies, stats = parse_companies(raw_df, 9)
-                    if not companies:
-                        st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
-                        st.stop()
-                    result, debug_rows_bbkn = build_bbkn(tpl_b, companies)
-                    st.session_state['bbkn_result']      = result
-                    st.session_state['bbkn_stats']       = stats
-                    st.session_state['bbkn_done']        = True
-                    st.session_state['bbkn_thang_val']   = bbkn_thang
-                    st.session_state['bbkn_nam_val']     = bbkn_nam
-                    st.session_state['bbkn_debug_rows']  = debug_rows_bbkn
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
-
-        if st.session_state.get("bbkn_done"):
-            stats  = st.session_state["bbkn_stats"]
-            result = st.session_state["bbkn_result"]
-            _t = st.session_state.get("bbkn_thang_val", bbkn_thang)
-            _n = st.session_state.get("bbkn_nam_val",   bbkn_nam)
-            fname  = f"BBKN_T{_t}_{_n}_HoanChinh.xlsx"
-            st.markdown(f"""
-            <div class="ok-box">
-              <div class="icon">✅</div>
-              <h3>Xử lý BBKN hoàn tất – Tháng {_t}/{_n}!</h3>
-              <p>File sẵn sàng — tải về và in ký hội đồng.</p>
-            </div>
-            <div class="stat-grid">
-              <div class="stat-card"><div class="num">{stats['companies']}</div><div class="lbl">Công ty cung cấp</div></div>
-              <div class="stat-card"><div class="num">{stats['drugs']}</div><div class="lbl">Mặt hàng có nhập</div></div>
-              <div class="stat-card"><div class="num">{stats['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
+        st.download_button(label=f"⬇️ Tải File BBKN – {fname}", data=result, file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkn")
+        sw = stats.get('shift_warnings', [])
+        if sw:
+            st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(sw)} dòng lệch cột trong file HPT – đã tự căn chỉnh:</b><br>
+            {'<br>'.join(f'• {w}' for w in sw)}<br><br>
+            <b>Vui lòng kiểm tra lại các dòng này trong file xuất ra.</b>
             </div>""", unsafe_allow_html=True)
-            st.download_button(label=f"⬇️ Tải File BBKN – {fname}", data=result, file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkn")
-            sw = stats.get('shift_warnings', [])
-            if sw:
-                st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(sw)} dòng lệch cột trong file HPT – đã tự căn chỉnh:</b><br>
-                {'<br>'.join(f'• {w}' for w in sw)}<br><br>
-                <b>Vui lòng kiểm tra lại các dòng này trong file xuất ra.</b>
-                </div>""", unsafe_allow_html=True)
-            dbg = st.session_state.get('bbkn_debug_rows', [])
-            if dbg:
-                st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(dbg)} dòng thiếu SL nhập (cột 9 trống) trong file HPT:</b><br>
-                {'<br>'.join(f'• <b>{d["ten"]}</b> {d["nd"]} — dữ liệu thô: {", ".join(d["sl_raw"])}' for d in dbg)}<br><br>
-                <b>Kiểm tra lại HPT: các dòng này có thể bị lệch cột hoặc HPT không xuất SL nhập.</b>
-                </div>""", unsafe_allow_html=True)
-            st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Ngang · Fit All Columns on One Page</b>.
-            Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
+        dbg = st.session_state.get('bbkn_debug_rows', [])
+        if dbg:
+            st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(dbg)} dòng thiếu SL nhập (cột 9 trống) trong file HPT:</b><br>
+            {'<br>'.join(f'• <b>{d["ten"]}</b> {d["nd"]} — dữ liệu thô: {", ".join(d["sl_raw"])}' for d in dbg)}<br><br>
+            <b>Kiểm tra lại HPT: các dòng này có thể bị lệch cột hoặc HPT không xuất SL nhập.</b>
+            </div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Ngang · Fit All Columns on One Page</b>.
+        Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
 
-    # ── SUB-TAB BBKK ──────────────────────────────────────────────────────────
-    with sub_bbkk:
-        st.markdown("""<div class="tab-desc">
-        Upload <b>file dữ liệu thô BBKK từ HPT</b> (.xlsx) và <b>file form chuẩn kiểm kê</b>.<br>
-        Logic: Lọc bỏ dòng Số lượng thực tế = 0 · Điền đủ tên, lô, hạn dùng, SL sổ sách & thực tế.
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: BBKK
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🔎  Kiểm Kê (BBKK)":
+    st.markdown("""
+    <div class="page-header">
+      <div class="ph-icon">🔎</div>
+      <div>
+        <div class="ph-title">Biên Bản Kiểm Kê (BBKK)</div>
+        <div class="ph-sub">Tự động điền form kiểm kê từ dữ liệu thô HPT · Lọc SL thực tế = 0 · Điền tháng/năm tự động</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""<div class="tab-desc">
+    Upload <b>file dữ liệu thô BBKK từ HPT</b> (.xlsx) và <b>file form chuẩn kiểm kê</b>.<br>
+    Logic: Lọc bỏ dòng Số lượng thực tế = 0 · Điền đủ tên, lô, hạn dùng, SL sổ sách & thực tế.
+    </div>""", unsafe_allow_html=True)
+
+    bbkk_ta, bbkk_tb = st.columns(2)
+    with bbkk_ta:
+        bbkk_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
+            format_func=lambda x: f"Tháng {x}", key="bbkk_thang")
+    with bbkk_tb:
+        bbkk_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
+            value=2026, key="bbkk_nam")
+
+    col1k, col2k = st.columns(2)
+    with col1k: raw_file_bbkk = st.file_uploader("📂 File dữ liệu thô HPT (BBKK)", type=["xls","xlsx"], key="bbkk_raw")
+    with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xls","xlsx"], key="bbkk_tpl")
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    ready_bbkk = raw_file_bbkk is not None and tpl_file_bbkk is not None
+    if st.button("⚡ Bắt đầu xử lý BBKK", disabled=not ready_bbkk, key="btn_bbkk"):
+        with st.spinner("Đang xử lý BBKK..."):
+            try:
+                raw_b_kk = raw_file_bbkk.read()
+                if raw_file_bbkk.name.endswith('.xls'):
+                    try:    raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None,engine='xlrd')
+                    except: raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
+                else:
+                    raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
+                tpl_b_kk = tpl_file_bbkk.read()
+                if tpl_file_bbkk.name.endswith('.xls'):
+                    import xlrd, openpyxl as _oxl2
+                    _xwb2 = xlrd.open_workbook(file_contents=tpl_b_kk)
+                    _xws2 = _xwb2.sheet_by_index(0)
+                    _nwb2 = _oxl2.Workbook(); _nws2 = _nwb2.active
+                    for _r2 in range(_xws2.nrows):
+                        for _c2 in range(_xws2.ncols):
+                            _nws2.cell(row=_r2+1,column=_c2+1,value=_xws2.cell_value(_r2,_c2))
+                    _tb2=io.BytesIO(); _nwb2.save(_tb2); tpl_b_kk=_tb2.getvalue()
+                drugs_kk, stats_kk = parse_bbkk_raw(raw_df_kk)
+                if not drugs_kk:
+                    st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
+                    st.stop()
+                result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam)
+                st.session_state['bbkk_result'] = result_kk
+                st.session_state['bbkk_stats']  = stats_kk
+                st.session_state['bbkk_done']   = True
+                st.session_state['bbkk_thang_val'] = bbkk_thang
+                st.session_state['bbkk_nam_val']   = bbkk_nam
+            except Exception as e:
+                st.error(f"❌ Lỗi: {e}"); st.exception(e)
+
+    if st.session_state.get("bbkk_done"):
+        stats_kk2  = st.session_state["bbkk_stats"]
+        result_kk2 = st.session_state["bbkk_result"]
+        _tk = st.session_state.get("bbkk_thang_val", bbkk_thang)
+        _nk = st.session_state.get("bbkk_nam_val",   bbkk_nam)
+        fname_kk = f"BBKK_T{_tk}_{_nk}_HoanChinh.xlsx"
+        st.markdown(f"""
+        <div class="ok-box">
+          <div class="icon">✅</div>
+          <h3>Xử lý BBKK hoàn tất – Tháng {_tk}/{_nk}!</h3>
+          <p>File sẵn sàng — tải về, in và ký hội đồng kiểm kê.</p>
+        </div>
+        <div class="stat-grid">
+          <div class="stat-card"><div class="num">{stats_kk2['drugs']}</div><div class="lbl">Mặt hàng có tồn</div></div>
+          <div class="stat-card"><div class="num">{stats_kk2['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
         </div>""", unsafe_allow_html=True)
-
-        bbkk_ta, bbkk_tb = st.columns(2)
-        with bbkk_ta:
-            bbkk_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
-                format_func=lambda x: f"Tháng {x}", key="bbkk_thang")
-        with bbkk_tb:
-            bbkk_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
-                value=2026, key="bbkk_nam")
-
-        col1k, col2k = st.columns(2)
-        with col1k: raw_file_bbkk = st.file_uploader("📂 File dữ liệu thô HPT (BBKK)", type=["xls","xlsx"], key="bbkk_raw")
-        with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xls","xlsx"], key="bbkk_tpl")
-        st.markdown("<hr>", unsafe_allow_html=True)
-
-        ready_bbkk = raw_file_bbkk is not None and tpl_file_bbkk is not None
-        if st.button("⚡ Bắt đầu xử lý BBKK", disabled=not ready_bbkk, key="btn_bbkk"):
-            with st.spinner("Đang xử lý BBKK..."):
-                try:
-                    raw_b_kk = raw_file_bbkk.read()
-                    if raw_file_bbkk.name.endswith('.xls'):
-                        try:    raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None,engine='xlrd')
-                        except: raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
-                    else:
-                        raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
-                    tpl_b_kk = tpl_file_bbkk.read()
-                    # Nếu form chuẩn là .xls thì convert sang xlsx bytes
-                    if tpl_file_bbkk.name.endswith('.xls'):
-                        import xlrd, openpyxl as _oxl2
-                        _xwb2 = xlrd.open_workbook(file_contents=tpl_b_kk)
-                        _xws2 = _xwb2.sheet_by_index(0)
-                        _nwb2 = _oxl2.Workbook(); _nws2 = _nwb2.active
-                        for _r2 in range(_xws2.nrows):
-                            for _c2 in range(_xws2.ncols):
-                                _nws2.cell(row=_r2+1,column=_c2+1,value=_xws2.cell_value(_r2,_c2))
-                        _tb2=io.BytesIO(); _nwb2.save(_tb2); tpl_b_kk=_tb2.getvalue()
-                    drugs_kk, stats_kk = parse_bbkk_raw(raw_df_kk)
-                    if not drugs_kk:
-                        st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
-                        st.stop()
-                    result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam)
-                    st.session_state['bbkk_result'] = result_kk
-                    st.session_state['bbkk_stats']  = stats_kk
-                    st.session_state['bbkk_done']   = True
-                    st.session_state['bbkk_thang_val'] = bbkk_thang
-                    st.session_state['bbkk_nam_val']   = bbkk_nam
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
-
-        if st.session_state.get("bbkk_done"):
-            stats_kk2  = st.session_state["bbkk_stats"]
-            result_kk2 = st.session_state["bbkk_result"]
-            _tk = st.session_state.get("bbkk_thang_val", bbkk_thang)
-            _nk = st.session_state.get("bbkk_nam_val",   bbkk_nam)
-            fname_kk = f"BBKK_T{_tk}_{_nk}_HoanChinh.xlsx"
-            st.markdown(f"""
-            <div class="ok-box">
-              <div class="icon">✅</div>
-              <h3>Xử lý BBKK hoàn tất – Tháng {_tk}/{_nk}!</h3>
-              <p>File sẵn sàng — tải về, in và ký hội đồng kiểm kê.</p>
-            </div>
-            <div class="stat-grid">
-              <div class="stat-card"><div class="num">{stats_kk2['drugs']}</div><div class="lbl">Mặt hàng có tồn</div></div>
-              <div class="stat-card"><div class="num">{stats_kk2['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
-            </div>""", unsafe_allow_html=True)
-            st.download_button(label=f"⬇️ Tải File BBKK – {fname_kk}", data=result_kk2, file_name=fname_kk,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkk")
-            st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Đứng</b>.
-            Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
+        st.download_button(label=f"⬇️ Tải File BBKK – {fname_kk}", data=result_kk2, file_name=fname_kk,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkk")
+        st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Đứng</b>.
+        Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
 
 
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 2 – XNT                                                            ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-with tab_xnt_main:
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: XNT
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "📊  Báo Cáo XNT":
+    st.markdown("""
+    <div class="page-header">
+      <div class="ph-icon">📊</div>
+      <div>
+        <div class="ph-title">Báo Cáo Xuất Nhập Tồn (XNT)</div>
+        <div class="ph-sub">Tự động điền form XNT · Giữ dòng Tồn cuối ≠ 0 · Phân nhóm công ty · Tính thành tiền</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("""<div class="tab-desc">
     Upload <b>file dữ liệu thô XNT từ HPT</b> (.xlsx) và <b>file BBXNT form chuẩn</b>.<br>
     Logic: Giữ dòng có Tồn cuối ≠ 0 · Phân nhóm theo công ty · Thành tiền = Đơn giá × Tồn cuối.
@@ -1873,7 +1914,6 @@ with tab_xnt_main:
                 else:
                     raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None)
                 tpl_b2  = tpl_file_xnt.read()
-                # Nếu form chuẩn là .xls thì convert sang bytes bình thường (openpyxl sẽ lỗi với .xls)
                 if tpl_file_xnt.name.endswith('.xls'):
                     import xlrd, openpyxl
                     xls_wb = xlrd.open_workbook(file_contents=tpl_b2)
@@ -1884,7 +1924,6 @@ with tab_xnt_main:
                         for c in range(xls_ws.ncols):
                             new_ws.cell(row=r+1, column=c+1, value=xls_ws.cell_value(r,c))
                     tmp_buf = io.BytesIO(); new_wb.save(tmp_buf); tpl_b2 = tmp_buf.getvalue()
-                # Cập nhật tháng/năm trong form
                 tpl_b2 = update_xnt_dates(tpl_b2, xnt_thang, xnt_nam)
                 companies2, stats2 = parse_companies(raw_df2, 12)
                 if not companies2:
@@ -1921,10 +1960,20 @@ with tab_xnt_main:
         Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
 
 
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 3 – ĐỐI CHIẾU DƯỢC                                                ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-with tab_dc:
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE: ĐỐI CHIẾU DƯỢC
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🔍  Đối Chiếu Dược":
+    st.markdown("""
+    <div class="page-header">
+      <div class="ph-icon">🔍</div>
+      <div>
+        <div class="ph-title">Đối Chiếu Dược</div>
+        <div class="ph-sub">Đối chiếu số liệu HPT vs Thống kê · XNT · Kiểm nhập · Kiểm kê</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("""<div class="info-box">
     Module đối chiếu số liệu HPT vs Thống kê. Upload file 1 lần, dùng cho cả 3 loại đối chiếu:
     <b>XNT · Kiểm nhập · Kiểm kê</b>.
@@ -1965,7 +2014,6 @@ with tab_dc:
         dc_f_bbkk = st.file_uploader("📄 Biên bản Kiểm kê – BBKK",
             type=["xlsx","xls"], key="dc_bbkk")
 
-    # Hiển thị trạng thái bảng mã
     gmap_dc = st.session_state.get('dc_global_map')
     if gmap_dc is not None and not gmap_dc.empty:
         n_ma = gmap_dc['ma'].nunique()
@@ -1974,7 +2022,6 @@ with tab_dc:
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # Tùy chọn cột SL
     dc_sl_col_kn = 9; dc_sl_col_kk = 8
     with st.expander("⚙️ Tùy chọn cột số lượng (nếu cấu trúc file khác mặc định)", expanded=False):
         dcc1, dcc2 = st.columns(2)
@@ -2003,14 +2050,13 @@ with tab_dc:
                         index=list(opts2.keys()).index(def_kk), key="dc_sel_kk")]
                 except: pass
 
-    # 3 sub-tabs bên trong tab Đối Chiếu
+    # Sub-tabs đối chiếu
     sub_xnt, sub_kn, sub_kk = st.tabs([
         "📊 Đối chiếu XNT",
         "📥 Đối chiếu Kiểm nhập",
         "🔍 Đối chiếu Kiểm kê",
     ])
 
-    # ── SUB-TAB: XNT ──────────────────────────────────────────────────────────
     with sub_xnt:
         st.markdown("""<div class="info-box">
         Cần file <b>XNT thô HPT</b> + <b>XNT Thống kê</b> + file <b>Nhập/Xuất kho</b>.
@@ -2056,7 +2102,6 @@ with tab_dc:
                     'ton_xnt':'Tồn HPT','ton_tk':'Tồn TK','cl':'Chênh lệch'}),
                     use_container_width=True, hide_index=True)
 
-    # ── SUB-TAB: KIỂM NHẬP ────────────────────────────────────────────────────
     with sub_kn:
         st.markdown("""<div class="info-box">
         Cần file <b>BBKN</b> + <b>XNT Thống kê</b>. App tự động cộng tổng tất cả hóa đơn cùng tên+nồng độ+giá.
@@ -2101,7 +2146,6 @@ with tab_dc:
                     'ma':'Mã HPT','ten_tk':'Tên thuốc TK','nd':'Nồng độ','nhap_tk':'Nhập TK'}),
                     use_container_width=True, hide_index=True)
 
-    # ── SUB-TAB: KIỂM KÊ ──────────────────────────────────────────────────────
     with sub_kk:
         st.markdown("""<div class="info-box">
         Cần file <b>BBKK</b> + <b>XNT Thống kê</b>. App tự động cộng tổng các dòng cùng tên+nồng độ+giá.
@@ -2146,7 +2190,7 @@ with tab_dc:
                     'ma':'Mã HPT','ten_tk':'Tên thuốc TK','nd':'Nồng độ','ton_tk':'Tồn TK'}),
                     use_container_width=True, hide_index=True)
 
-    # ── Xuất Excel tổng hợp đối chiếu ─────────────────────────────────────────
+    # Xuất tổng hợp
     dc_has_any = any(st.session_state.get(k) for k in ['dc_xnt_done','dc_kn_done','dc_kk_done'])
     if dc_has_any:
         st.markdown("<hr>", unsafe_allow_html=True)
