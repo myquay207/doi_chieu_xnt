@@ -1,7 +1,7 @@
 """
 HỆ THỐNG TỰ ĐỘNG HÓA BIÊN BẢN DƯỢC – Bệnh viện Đà Nẵng
 Hỗ trợ: BBKN · BBKK · XNT · Đối Chiếu Dược (XNT, Kiểm nhập, Kiểm kê)
-v7 – Thêm module Biên Bản Kiểm Kê (BBKK) + chọn tháng/năm báo cáo tự động
+v8 – Hỗ trợ upload .xls cho tất cả form + tự động phát hiện/căn chỉnh dòng lệch cột (fix Ramipril-type bug)
 """
 
 import io, math, copy, datetime, re, warnings
@@ -22,52 +22,319 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;600;700&display=swap');
-html,body,[class*="css"]{font-family:'Be Vietnam Pro',sans-serif;}
-.hero{background:linear-gradient(135deg,#1a3a5c 0%,#2563a8 60%,#1e7fcb 100%);
-  border-radius:16px;padding:32px 36px 24px;margin-bottom:24px;color:white;
-  box-shadow:0 8px 32px rgba(37,99,168,.25);}
-.hero h1{font-size:1.55rem;font-weight:700;margin:0 0 6px;line-height:1.3;}
-.hero .sub{font-size:.88rem;font-weight:300;opacity:.85;margin:0;}
-.hero .badge{display:inline-block;background:rgba(255,255,255,.18);border-radius:20px;
-  padding:3px 12px;font-size:.75rem;font-weight:600;letter-spacing:1px;
-  margin-bottom:12px;text-transform:uppercase;}
-.tab-desc{background:#eff6ff;border-left:4px solid #2563a8;border-radius:0 10px 10px 0;
-  padding:12px 16px;margin:12px 0 18px;font-size:.86rem;color:#1e3a5f;line-height:1.6;}
-.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0;}
-.stat-grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0;}
-.stat-card{background:white;border:1px solid #e2e8f0;border-radius:12px;
-  padding:16px 12px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.06);}
-.stat-card .num{font-size:1.7rem;font-weight:700;color:#1a3a5c;line-height:1;}
-.stat-card .lbl{font-size:.75rem;color:#64748b;margin-top:4px;}
-.ok-box{background:#f0fdf4;border:1.5px solid #86efac;border-radius:12px;
-  padding:18px 20px;margin:16px 0;text-align:center;}
-.ok-box .icon{font-size:2rem;}.ok-box h3{color:#166534;margin:6px 0 4px;font-size:1rem;}
-.ok-box p{color:#15803d;font-size:.84rem;margin:0;}
-.note{background:#fff7ed;border-left:4px solid #f59e0b;border-radius:0 10px 10px 0;
-  padding:10px 14px;font-size:.82rem;color:#92400e;margin-top:14px;line-height:1.6;}
-.warn-box{background:#fff7ed;border-left:4px solid #f59e0b;border-radius:0 10px 10px 0;
-  padding:11px 15px;margin:10px 0;font-size:.84rem;color:#92400e;line-height:1.6;}
-.info-box{background:#eff6ff;border-left:4px solid #2563a8;border-radius:0 10px 10px 0;
-  padding:11px 15px;margin:10px 0 16px;font-size:.85rem;color:#1e3a5f;line-height:1.7;}
-.map-box{background:#f0fdf4;border:1.5px solid #86efac;border-radius:10px;
-  padding:10px 16px;margin:10px 0;font-size:.85rem;color:#166534;}
-.upload-section{background:#f8faff;border:1.5px solid #c7d9f5;border-radius:14px;
-  padding:18px 20px;margin-bottom:18px;}
-.upload-section h4{color:#1a3a5c;font-size:.82rem;font-weight:700;letter-spacing:1.2px;
-  text-transform:uppercase;margin:0 0 14px;}
-.stButton>button{background:linear-gradient(135deg,#1a3a5c,#2563a8)!important;
-  color:white!important;font-weight:600!important;font-size:.95rem!important;
-  border:none!important;border-radius:10px!important;padding:13px 0!important;
-  width:100%!important;box-shadow:0 4px 14px rgba(37,99,168,.3)!important;}
-[data-testid="stDownloadButton"]>button{background:linear-gradient(135deg,#166534,#16a34a)!important;
-  color:white!important;font-weight:700!important;font-size:1rem!important;
-  border:none!important;border-radius:10px!important;padding:15px 0!important;
-  width:100%!important;box-shadow:0 4px 14px rgba(22,163,74,.3)!important;}
-[data-testid="stFileUploader"]{border:2px dashed #2563a8!important;
-  border-radius:12px!important;background:#f0f6ff!important;}
-hr{border:none;border-top:1px solid #e2e8f0;margin:20px 0;}
-#MainMenu,footer{visibility:hidden;}
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&family=Mulish:wght@300;400;600&display=swap');
+
+/* ── Base ── */
+html, body, [class*="css"] {
+  font-family: 'Mulish', sans-serif;
+  color: #1a2332;
+}
+
+/* ── Hero Banner ── */
+.hero {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #0b1f3a 0%, #0f3460 45%, #16528a 80%, #0e7abf 100%);
+  border-radius: 20px;
+  padding: 36px 40px 30px;
+  margin-bottom: 28px;
+  color: white;
+  box-shadow: 0 12px 40px rgba(11,31,58,.35), 0 2px 0 rgba(255,255,255,.08) inset;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -60px; right: -60px;
+  width: 280px; height: 280px;
+  background: radial-gradient(circle, rgba(255,255,255,.07) 0%, transparent 70%);
+  border-radius: 50%;
+}
+.hero::after {
+  content: '';
+  position: absolute;
+  bottom: -40px; left: 30%;
+  width: 380px; height: 120px;
+  background: radial-gradient(ellipse, rgba(14,122,191,.35) 0%, transparent 70%);
+  border-radius: 50%;
+}
+.hero .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,.14);
+  border: 1px solid rgba(255,255,255,.22);
+  border-radius: 30px;
+  padding: 4px 14px;
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  margin-bottom: 14px;
+  text-transform: uppercase;
+  backdrop-filter: blur(4px);
+}
+.hero h1 {
+  font-family: 'Montserrat', sans-serif;
+  font-size: 1.75rem;
+  font-weight: 800;
+  margin: 0 0 8px;
+  line-height: 1.25;
+  letter-spacing: -.3px;
+}
+.hero h1 span {
+  color: #7dd3fc;
+}
+.hero .sub {
+  font-size: .9rem;
+  font-weight: 300;
+  opacity: .8;
+  margin: 0;
+  letter-spacing: .2px;
+}
+.hero .dots {
+  display: inline-block;
+  width: 5px; height: 5px;
+  background: rgba(255,255,255,.4);
+  border-radius: 50%;
+  margin: 0 8px;
+  vertical-align: middle;
+}
+.hero-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+.hero-pill {
+  background: rgba(255,255,255,.1);
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: .74rem;
+  font-weight: 600;
+  letter-spacing: .5px;
+  color: rgba(255,255,255,.9);
+}
+
+/* ── Tabs styling ── */
+[data-testid="stTabs"] [role="tablist"] {
+  gap: 4px;
+  border-bottom: 2px solid #e4eaf3;
+  padding-bottom: 0;
+}
+[data-testid="stTabs"] button[role="tab"] {
+  font-family: 'Montserrat', sans-serif !important;
+  font-weight: 600 !important;
+  font-size: .82rem !important;
+  letter-spacing: .3px;
+  color: #64748b !important;
+  border-radius: 8px 8px 0 0 !important;
+  padding: 8px 16px !important;
+  transition: all .2s;
+}
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+  color: #0f3460 !important;
+  background: #eff6ff !important;
+  border-bottom: 2px solid #0f3460 !important;
+}
+
+/* ── Info / desc boxes ── */
+.tab-desc {
+  background: linear-gradient(to right, #eff6ff, #f8fbff);
+  border-left: 4px solid #2b6cb0;
+  border-radius: 0 12px 12px 0;
+  padding: 13px 18px;
+  margin: 14px 0 20px;
+  font-size: .87rem;
+  color: #1e3a5f;
+  line-height: 1.7;
+  box-shadow: 0 1px 6px rgba(43,108,176,.08);
+}
+.info-box {
+  background: linear-gradient(to right, #eff6ff, #f8fbff);
+  border-left: 4px solid #2b6cb0;
+  border-radius: 0 12px 12px 0;
+  padding: 12px 18px;
+  margin: 10px 0 18px;
+  font-size: .86rem;
+  color: #1e3a5f;
+  line-height: 1.75;
+  box-shadow: 0 1px 6px rgba(43,108,176,.08);
+}
+.warn-box {
+  background: linear-gradient(to right, #fffbeb, #fefce8);
+  border-left: 4px solid #d97706;
+  border-radius: 0 12px 12px 0;
+  padding: 12px 16px;
+  margin: 10px 0;
+  font-size: .85rem;
+  color: #78350f;
+  line-height: 1.7;
+}
+.note {
+  background: linear-gradient(to right, #fff7ed, #fffbf5);
+  border-left: 4px solid #f59e0b;
+  border-radius: 0 12px 12px 0;
+  padding: 11px 16px;
+  font-size: .83rem;
+  color: #92400e;
+  margin-top: 16px;
+  line-height: 1.65;
+}
+.map-box {
+  background: #f0fdf4;
+  border: 1.5px solid #86efac;
+  border-radius: 10px;
+  padding: 10px 16px;
+  margin: 10px 0;
+  font-size: .85rem;
+  color: #166534;
+}
+
+/* ── Stat cards ── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin: 18px 0;
+}
+.stat-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 16px 0;
+}
+.stat-card {
+  background: white;
+  border: 1px solid #e8eef6;
+  border-radius: 14px;
+  padding: 18px 14px;
+  text-align: center;
+  box-shadow: 0 2px 12px rgba(15,52,96,.07);
+  transition: transform .2s, box-shadow .2s;
+  position: relative;
+  overflow: hidden;
+}
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #0f3460, #2b6cb0);
+  border-radius: 14px 14px 0 0;
+}
+.stat-card .num {
+  font-family: 'Montserrat', sans-serif;
+  font-size: 1.9rem;
+  font-weight: 800;
+  color: #0f3460;
+  line-height: 1;
+}
+.stat-card .lbl {
+  font-size: .73rem;
+  color: #6b7a96;
+  margin-top: 6px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+}
+
+/* ── Success box ── */
+.ok-box {
+  background: linear-gradient(135deg, #f0fdf4, #dcfce7);
+  border: 1.5px solid #6ee7b7;
+  border-radius: 16px;
+  padding: 22px 24px;
+  margin: 18px 0;
+  text-align: center;
+  box-shadow: 0 4px 16px rgba(22,163,74,.1);
+}
+.ok-box .icon { font-size: 2.2rem; }
+.ok-box h3 {
+  font-family: 'Montserrat', sans-serif;
+  color: #14532d;
+  margin: 8px 0 5px;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+.ok-box p { color: #15803d; font-size: .86rem; margin: 0; }
+
+/* ── Upload area ── */
+[data-testid="stFileUploader"] {
+  border: 2px dashed #93c5fd !important;
+  border-radius: 14px !important;
+  background: linear-gradient(135deg, #f0f7ff, #f8fbff) !important;
+  transition: border-color .2s;
+}
+[data-testid="stFileUploader"]:hover {
+  border-color: #2b6cb0 !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+  background: linear-gradient(135deg, #0b1f3a 0%, #0f3460 50%, #1a5ba0 100%) !important;
+  color: white !important;
+  font-family: 'Montserrat', sans-serif !important;
+  font-weight: 700 !important;
+  font-size: .9rem !important;
+  letter-spacing: .5px !important;
+  border: none !important;
+  border-radius: 12px !important;
+  padding: 13px 0 !important;
+  width: 100% !important;
+  box-shadow: 0 4px 18px rgba(11,31,58,.3), 0 1px 0 rgba(255,255,255,.1) inset !important;
+  transition: all .2s !important;
+  text-transform: uppercase !important;
+}
+.stButton > button:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 7px 24px rgba(11,31,58,.35) !important;
+}
+[data-testid="stDownloadButton"] > button {
+  background: linear-gradient(135deg, #14532d 0%, #166534 50%, #15803d 100%) !important;
+  color: white !important;
+  font-family: 'Montserrat', sans-serif !important;
+  font-weight: 700 !important;
+  font-size: .95rem !important;
+  letter-spacing: .5px !important;
+  border: none !important;
+  border-radius: 12px !important;
+  padding: 15px 0 !important;
+  width: 100% !important;
+  box-shadow: 0 4px 18px rgba(20,83,45,.3) !important;
+  text-transform: uppercase !important;
+}
+
+/* ── Selectbox & number input ── */
+[data-testid="stSelectbox"] > div > div,
+[data-testid="stNumberInput"] > div > div > input {
+  border-radius: 10px !important;
+  border-color: #cbd5e1 !important;
+  font-family: 'Mulish', sans-serif !important;
+}
+
+/* ── Dataframe ── */
+[data-testid="stDataFrame"] {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* ── Spinner text ── */
+[data-testid="stSpinner"] p {
+  font-family: 'Mulish', sans-serif !important;
+  color: #0f3460 !important;
+}
+
+/* ── Divider ── */
+hr {
+  border: none;
+  border-top: 1px solid #e8eef6;
+  margin: 22px 0;
+}
+
+/* ── Hide Streamlit chrome ── */
+#MainMenu, footer { visibility: hidden; }
+header[data-testid="stHeader"] { background: transparent; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,22 +365,57 @@ def is_drug_row(v0, col2):
     except: return False
     return not pd.isna(col2) and isinstance(col2, str) and not col2.strip().isdigit()
 
+def _find_name_col(row, expected=2):
+    """Nếu cột tên thuốc bị lệch, tìm cột string đầu tiên không phải số trong range [1..5]."""
+    for c in range(1, 6):
+        try:
+            v = row[c]
+        except: continue
+        if not pd.isna(v) and isinstance(v, str) and not str(v).strip().isdigit():
+            return c
+    return expected
+
 def parse_companies(raw_df, qty_col):
-    result, cur, rows, skipped = [], None, [], 0
+    result, cur, rows, skipped, shift_warnings = [], None, [], 0, []
     for _, row in raw_df.iterrows():
         v0 = row[0]
         if is_co_row(v0, row):
+            name_candidate = ' '.join(str(v0).strip().split())  # normalize whitespace
+            # Bỏ qua dòng công ty trùng tên với công ty đang xử lý (tránh lặp header)
+            if cur and ' '.join(cur.split()) == name_candidate:
+                continue
             if cur and rows: result.append((cur, rows))
-            cur, rows = str(v0).strip(), []
+            cur, rows = name_candidate, []
         elif is_drug_row(v0, row[2]):
             try:    qty = float(row[qty_col]) if not pd.isna(row[qty_col]) else 0
             except: qty = 0
             if qty != 0: rows.append(row)
             else: skipped += 1
+        else:
+            # Phát hiện dòng thuốc bị lệch cột (vd: Ramipril có merge cell ở cột trước)
+            try: int(str(v0).strip())
+            except: continue
+            name_col = _find_name_col(row, expected=2)
+            if name_col != 2 and not pd.isna(row[name_col]):
+                offset = name_col - 2
+                new_vals = {}
+                for c in row.index:
+                    src = c + offset
+                    try: new_vals[c] = row[src]
+                    except: new_vals[c] = float('nan')
+                new_vals[0] = row[0]
+                new_row = pd.Series(new_vals)
+                drug_name = str(new_row[2]).strip() if not pd.isna(new_row[2]) else str(v0)
+                shift_warnings.append(f"STT {v0}: '{drug_name}' phát hiện lệch {offset} cột → đã tự căn chỉnh")
+                try:    qty = float(new_row[qty_col]) if not pd.isna(new_row[qty_col]) else 0
+                except: qty = 0
+                if qty != 0: rows.append(new_row)
+                else: skipped += 1
     if cur and rows: result.append((cur, rows))
     return result, {'companies': len(result),
                     'drugs': sum(len(d) for _, d in result),
-                    'skipped': skipped}
+                    'skipped': skipped,
+                    'shift_warnings': shift_warnings}
 
 def gs(ws, r, c):
     cl = ws.cell(row=r, column=c)
@@ -149,28 +451,47 @@ def bbkn_h(ws, r):
 def build_bbkn(tmpl_bytes, companies):
     wb = load_workbook(io.BytesIO(tmpl_bytes))
     ws = wb.active
-    cs = {c: gs(ws,15,c) for c in range(1,13)}
-    ds = {c: gs(ws,16,c) for c in range(1,13)}
-    tks = gs(ws,213,11)
+
+    # Xóa row 14 thừa (dòng trắng giữa header và data) TRƯỚC khi làm bất cứ điều gì khác
+    # để DS và tất cả row numbers dưới đây đều đúng
+    ws.delete_rows(14, 1)
+
+    # Sau khi xóa row 14: row 15 cũ → row 14, row 16 cũ → row 15, ...
+    cs = {c: gs(ws,14,c) for c in range(1,13)}   # style từ dòng công ty (row 14 mới)
+    ds = {c: gs(ws,15,c) for c in range(1,13)}   # style từ dòng data (row 15 mới)
+    tks = gs(ws,212,11)                            # style tổng cộng (row 213 cũ → 212)
 
     fs = None
     for row in ws.iter_rows():
         for cell in row:
             if cell.value == 'HỘI ĐỒNG KIỂM NHẬP': fs = cell.row; break
         if fs: break
-    if not fs: fs = 215
+    if not fs: fs = 214
 
-    DS = 15
+    DS = 14
     need = sum(1+len(d) for _,d in companies)+1
     ins = (DS+need-1) - fs + 1
     if ins > 0: ws.insert_rows(fs, ins); fs += ins
 
     for m in [str(mr) for mr in ws.merged_cells.ranges if DS <= mr.min_row < fs]:
-        ws.merged_cells.remove(m)
+        try: ws.unmerge_cells(m)
+        except: pass
     for r in range(DS, fs):
         for c in range(1,13):
             try: ws.cell(row=r,column=c).value = None
             except: pass
+
+    # Xóa tên công ty thừa trong phần header (row 13) nếu template có sẵn
+    for r in range(13, DS):
+        v0 = ws.cell(row=r, column=1).value
+        if v0 and isinstance(v0, str):
+            s = v0.strip()
+            # Nếu ô này chứa tên công ty (không phải tiêu đề cột) thì xóa
+            is_header_kw = any(kw in s for kw in ['STT','Số chứng','Tên thuốc','Nồng độ','Đơn vị','Thành tiền'])
+            if not is_header_kw:
+                for c in range(1, 13):
+                    try: ws.cell(row=r, column=c).value = None
+                    except: pass
 
     def wco(rn, name):
         cl = ws.cell(row=rn, column=1, value=name); ap(cl, cs[1])
@@ -205,9 +526,21 @@ def build_bbkn(tmpl_bytes, companies):
         cl12=ws.cell(row=rn,column=12,value=''); ap(cl12,ds[12])
 
     cr = DS; drn = []
+    debug_rows = []  # Thu thập dòng bất thường để hiển thị
     for name,drugs in companies:
         wco(cr,name); cr+=1
-        for i,dr in enumerate(drugs,1): wdr(cr,i,dr); drn.append(cr); cr+=1
+        for i,dr in enumerate(drugs,1):
+            # Kiểm tra dòng bất thường: SL nhập (dr[8]) trống nhưng đơn giá (dr[9]) có
+            sl = dr[8] if not pd.isna(dr[8]) else None
+            dg = dr[9] if not pd.isna(dr[9]) else None
+            if sl is None and dg is not None:
+                debug_rows.append({
+                    'ten': str(dr[2]).strip() if not pd.isna(dr[2]) else '?',
+                    'nd':  str(dr[3]).strip() if not pd.isna(dr[3]) else '',
+                    'sl_raw': [f"col{j}={dr[j]}" for j in range(6,12)
+                               if j < len(dr.index) and not pd.isna(dr[j])]
+                })
+            wdr(cr,i,dr); drn.append(cr); cr+=1
 
     tr = cr
     lbl=ws.cell(row=tr,column=1,value='Tổng cộng: ')
@@ -222,14 +555,27 @@ def build_bbkn(tmpl_bytes, companies):
     ck.number_format='#,##0'; ck.border=b_med()
     ws.row_dimensions[tr].height=22
 
-    ws.cell(row=13,column=3).value='Tên thuốc'
-    for col in range(1,13):
-        for r in (13,14):
-            safe_set(ws.cell(row=r,column=col),fill=NO_FILL,
-                     font=Font(name='Times New Roman',bold=True,size=12),
-                     border=b_med(),
-                     alignment=Alignment(horizontal='center',vertical='center',wrap_text=True))
-    ws.row_dimensions[13].height=42; ws.row_dimensions[14].height=18
+    # Ghi lại tiêu đề cột BBKN (rows 13-14) đúng thứ tự
+    # Unmerge rows 13-14 trước để tránh lỗi MergedCell read-only
+    to_remove_bbkn = [str(mr) for mr in ws.merged_cells.ranges
+                      if mr.min_row <= 14 and mr.max_row >= 13]
+    for m in to_remove_bbkn:
+        try: ws.unmerge_cells(m)
+        except: pass
+
+    bbkn_headers = {
+        1: 'STT', 2: 'Số chứng từ', 3: 'Tên thuốc', 4: 'Nồng độ\nhàm lượng',
+        5: 'Đơn vị tính', 6: 'Số lô', 7: 'Hãng, nước\nsản xuất',
+        8: 'Hạn dùng', 9: 'Đơn giá', 10: 'Số lượng', 11: 'Thành tiền', 12: 'Ghi chú'
+    }
+    for col, hdr in bbkn_headers.items():
+        cl = ws.cell(row=13, column=col)
+        cl.value = hdr
+        safe_set(cl, fill=NO_FILL,
+                 font=Font(name='Times New Roman', bold=True, size=12),
+                 border=b_med(),
+                 alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
+    ws.row_dimensions[13].height = 42
 
     for r in range(DS,tr+1):
         av=ws.cell(row=r,column=1).value; cv=ws.cell(row=r,column=3).value
@@ -258,9 +604,9 @@ def build_bbkn(tmpl_bytes, companies):
     ws.sheet_properties.pageSetUpPr.fitToPage=True
     for a,v in [('left',.4),('right',.4),('top',.5),('bottom',.5),('header',.2),('footer',.2)]:
         setattr(ws.page_margins,a,v)
-    ws.print_title_rows='1:14'; ws.freeze_panes=ws.cell(row=DS,column=1)
+    ws.print_title_rows='1:13'; ws.freeze_panes=ws.cell(row=DS,column=1)
 
-    out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue()
+    out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue(), debug_rows
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -306,7 +652,8 @@ def build_xnt(tmpl_bytes, companies):
     if ins>0: ws.insert_rows(fs,ins); fs+=ins
 
     for m in [str(mr) for mr in ws.merged_cells.ranges if DS<=mr.min_row<fs]:
-        ws.merged_cells.remove(m)
+        try: ws.unmerge_cells(m)
+        except: pass
     for r in range(DS,fs):
         for c in range(1,15):
             try: ws.cell(row=r,column=c).value=None
@@ -903,13 +1250,13 @@ def ten_thang_viet(thang):
 def format_ngay_viet(ngay, thang, nam):
     return f"ngày {ngay} tháng {thang} năm {nam}"
 
-BBKK_W = {1:5, 2:35, 3:14, 4:7.5, 5:10, 6:32, 7:11, 8:10, 9:10, 10:8, 11:10}
+BBKK_W = {1:5, 2:35, 3:14, 4:7.5, 5:10, 6:10, 7:32, 8:11, 9:11, 10:10, 11:10, 12:8}
 BBKK_A = {1:('center','center'), 2:('left','center'), 3:('left','center'),
-          4:('center','center'), 5:('center','center'), 6:('left','center'),
-          7:('center','center'), 8:('right','center'), 9:('right','center'),
-          10:('right','center'), 11:('center','center')}
-BBKK_WRAP = {2, 3, 6}
-BBKK_NUM  = {8, 9}
+          4:('center','center'), 5:('right','center'), 6:('center','center'),
+          7:('left','center'),   8:('center','center'), 9:('right','center'),
+          10:('right','center'), 11:('right','center'), 12:('center','center')}
+BBKK_WRAP = {2, 3, 7}
+BBKK_NUM  = {5, 9, 10}
 
 def bbkk_h(ws, r):
     ml = 1
@@ -926,21 +1273,70 @@ def parse_bbkk_raw(raw_df):
     Columns in raw: 0=STT, 1=TenThuoc, 2=NongDo, 3=DVT, 4=DonGia,
                     5=SoLo, 6=HangSX, 7=HanDung, 8=SLSoSach, 9=ThanhTien, 10=SLThucTe
     Lọc dòng SL Thực tế = 0 (col 10); nếu col10 NaN dùng col8.
+    Tự động phát hiện dòng bị lệch cột (vd: Ramipril có dòng phụ "Tân giao...").
     Trả về list of row (pandas Series)
     """
     drugs, skipped = [], 0
+
+    # Xác định số cột tối đa của raw_df
+    max_col = max(raw_df.columns) if len(raw_df.columns) else 10
+
+    def _try_parse_row(row):
+        """
+        Cố gắng đọc 1 dòng có STT hợp lệ.
+        Trả về row đã chuẩn hoá (hoặc None nếu bỏ qua).
+        Logic: cột 1 phải là tên thuốc (string). Nếu col1 là số/NaN thì thử dịch phải.
+        """
+        # Kiểm tra col 1 là tên thuốc bình thường
+        v1 = row.get(1, float('nan')) if hasattr(row, 'get') else (row[1] if 1 in row.index else float('nan'))
+        if not pd.isna(v1) and isinstance(v1, str) and v1.strip() and not v1.strip().replace('.','',1).isdigit():
+            return row  # dòng bình thường
+
+        # col1 bị lệch → tìm cột string đầu tiên trong phạm vi [1..4]
+        for shift in range(1, 5):
+            cidx = 1 + shift
+            if cidx > max_col:
+                break
+            vc = row[cidx] if cidx in row.index else float('nan')
+            if not pd.isna(vc) and isinstance(vc, str) and vc.strip() and not vc.strip().replace('.','',1).isdigit():
+                # Dịch toàn bộ cột sang trái 'shift' bước, giữ nguyên col 0
+                new_vals = {0: row[0]}
+                for c in range(1, max_col + 1):
+                    src = c + shift
+                    new_vals[c] = row[src] if src in row.index else float('nan')
+                return pd.Series(new_vals)
+        return None  # không tìm được → bỏ qua
+
     for _, row in raw_df.iterrows():
-        try: int(str(row[0]).strip())
-        except: continue
-        if pd.isna(row[1]) or not isinstance(row[1], str): continue
+        try:
+            int(str(row[0]).strip())
+        except:
+            # Dòng không có STT số: có thể là dòng phụ nồng độ/thành phần (vd: "Tân giao 1,33g")
+            # Nếu col1 có text và col0 NaN/empty → bỏ qua hoàn toàn
+            continue
+
+        fixed_row = _try_parse_row(row)
+        if fixed_row is None:
+            skipped += 1
+            continue
+
+        v1 = fixed_row[1] if 1 in fixed_row.index else float('nan')
+        if pd.isna(v1) or not isinstance(v1, str):
+            skipped += 1
+            continue
+
         # Số lượng thực tế: col 10 nếu có, else col 8
-        sl_tt = row[10] if not pd.isna(row.get(10, float('nan'))) else (row[8] if not pd.isna(row[8]) else 0)
-        try: sl_tt = float(sl_tt)
-        except: sl_tt = 0
+        col10 = fixed_row[10] if 10 in fixed_row.index else float('nan')
+        col8  = fixed_row[8]  if 8  in fixed_row.index else float('nan')
+        sl_tt = col10 if not pd.isna(col10) else (col8 if not pd.isna(col8) else 0)
+        try:
+            sl_tt = float(sl_tt)
+        except:
+            sl_tt = 0
         if sl_tt == 0:
             skipped += 1
             continue
-        drugs.append(row)
+        drugs.append(fixed_row)
     return drugs, {'drugs': len(drugs), 'skipped': skipped}
 
 def build_bbkk(tmpl_bytes, drugs, thang, nam):
@@ -968,10 +1364,44 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam):
     )
     ws.cell(row=10, column=1).value = new_r10
 
+    # ── Ghi lại tiêu đề cột BBKK (rows 11-12) để đảm bảo đúng thứ tự ──────────
+    # Trước tiên unmerge tất cả merged cells ở rows 11-12 để tránh lỗi MergedCell read-only
+    to_remove_hdr = [str(mr) for mr in ws.merged_cells.ranges
+                     if mr.min_row <= 12 and mr.max_row >= 11]
+    for m in to_remove_hdr:
+        try: ws.unmerge_cells(m)
+        except: pass
+
+    # Row 11: tiêu đề chính
+    bbkk_headers = {
+        1: 'STT', 2: 'Tên thuốc - Nồng độ - Hàm lượng', 3: '',
+        4: 'Đơn vị tính', 5: 'Đơn giá', 6: 'Số lô',
+        7: 'Hãng sản xuất', 8: 'Hạn dùng',
+        9: 'Số lượng', 10: '', 11: 'Hỏng', 12: 'Ghi chú'
+    }
+    for col, hdr in bbkk_headers.items():
+        cl = ws.cell(row=11, column=col)
+        cl.value = hdr
+        safe_set(cl, fill=NO_FILL,
+                 font=Font(name='Times New Roman', bold=True, size=11),
+                 border=b_med(),
+                 alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
+    ws.row_dimensions[11].height = 30
+    # Row 12: sub-header "Sổ sách"/"Thực tế" cho cột SL, còn lại blank
+    bbkk_sub = {9: 'Sổ sách', 10: 'Thực tế'}
+    for col in range(1, 13):
+        cl = ws.cell(row=12, column=col)
+        cl.value = bbkk_sub.get(col, None)
+        safe_set(cl, fill=NO_FILL,
+                 font=Font(name='Times New Roman', bold=True, size=11),
+                 border=b_med(),
+                 alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
+    ws.row_dimensions[12].height = 16
+
     # ── Lấy style từ template ────────────────────────────────────────────────
     DS = 13  # data start row (row 13 = first data row in template, rows 11-12 = headers)
-    cs = {c: gs(ws, DS, c) for c in range(1, 12)}
-    ds = {c: gs(ws, DS+1 if ws.max_row > DS else DS, c) for c in range(1, 12)}
+    cs = {c: gs(ws, DS, c) for c in range(1, 13)}
+    ds = {c: gs(ws, DS+1 if ws.max_row > DS else DS, c) for c in range(1, 13)}
 
     # Lấy style từ row đầu tiên có số liệu
     first_data_row = None
@@ -980,28 +1410,40 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam):
             first_data_row = r
             break
     if first_data_row:
-        ds = {c: gs(ws, first_data_row, c) for c in range(1, 12)}
+        ds = {c: gs(ws, first_data_row, c) for c in range(1, 13)}
 
-    # ── Tìm vị trí "Tổng khoản" để insert rows ──────────────────────────────
-    fs = None
+    # ── Tìm TẤT CẢ vị trí "Tổng khoản" → dùng dòng CUỐI CÙNG, xóa các dòng cũ ──
+    tk_rows = []
     for row in ws.iter_rows():
         for cell in row:
             if cell.value and 'Tổng khoản' in str(cell.value):
-                fs = cell.row; break
-        if fs: break
-    if not fs: fs = DS + 185  # fallback
+                tk_rows.append(cell.row)
+    # Dùng dòng Tổng khoản cuối cùng làm mốc (đó là dòng template gốc đúng)
+    if tk_rows:
+        fs = max(tk_rows)
+        # Xóa nội dung tất cả các dòng Tổng khoản cũ khác (ngoài dòng cuối)
+        for old_tk in tk_rows:
+            for c in range(1, 12):
+                try: ws.cell(row=old_tk, column=c).value = None
+                except: pass
+    else:
+        fs = DS + 185  # fallback
 
-    # Xóa dữ liệu cũ từ DS đến fs-1
-    for m in [str(mr) for mr in ws.merged_cells.ranges if DS <= mr.min_row < fs]:
-        ws.merged_cells.remove(m)
-    for r in range(DS, fs):
-        for c in range(1, 12):
+    # Xóa dữ liệu cũ từ DS đến fs (bao gồm cả dòng Tổng khoản cuối cùng)
+    # Unmerge TOÀN BỘ sheet từ DS trở xuống để tránh MergedCell khi insert rows
+    # (đặc biệt dòng chữ ký có merge cells sẽ xung đột nếu data insert vào đúng dòng đó)
+    all_merges = [str(mr) for mr in ws.merged_cells.ranges if mr.min_row >= DS]
+    for m in all_merges:
+        try: ws.unmerge_cells(m)
+        except: pass
+    for r in range(DS, fs + 1):
+        for c in range(1, 13):
             try: ws.cell(row=r, column=c).value = None
             except: pass
 
     # ── Insert rows nếu cần ─────────────────────────────────────────────────
     need = len(drugs) + 1  # +1 cho dòng Tổng khoản
-    current_space = fs - DS
+    current_space = fs - DS  # số dòng data hiện có (không tính dòng Tổng khoản)
     if need > current_space:
         ins = need - current_space
         ws.insert_rows(fs, ins)
@@ -1011,33 +1453,35 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam):
     def wdr_kk(rn, stt, dr):
         ten = str(dr[1]).strip() if not pd.isna(dr[1]) else ''
         nd  = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
-        # Ghép tên + nồng độ vào cột 2 (như template gốc)
-        ten_full = f"{ten} {nd}".strip() if nd else ten
+        # Form BBKK: 1=STT 2=TênThuốc 3=NồngĐộ 4=DVT 5=ĐơnGiá 6=SốLô 7=HãngSX 8=HạnDùng 9=SLSổSách 10=SLThựcTế 11=Hỏng 12=GhiChú
+        # Raw data: col0=STT col1=Tên col2=NồngĐộ col3=DVT col4=ĐơnGiá col5=SốLô col6=HãngSX col7=HạnDùng col8=SLSổSách col10=SLThựcTế
         cols = [
-            (1,  stt,                                               'center', False, None),
-            (2,  ten_full,                                          'left',   True,  None),
-            (3,  nd,                                                'left',   False, None),
-            (4,  str(dr[3]).strip() if not pd.isna(dr[3]) else '',  'center', False, None),
-            (5,  str(dr[5]).strip() if not pd.isna(dr[5]) else '',  'center', False, None),
-            (6,  str(dr[6]).strip() if not pd.isna(dr[6]) else '',  'left',   True,  None),
-            (7,  dr[7] if isinstance(dr[7], datetime.datetime)
-                 else ('' if pd.isna(dr[7]) else dr[7]),            'center', False, 'DD/MM/YYYY'),
-            (8,  float(dr[8]) if not pd.isna(dr[8]) else 0,        'right',  False, '#,##0'),
+            (1,  stt,                                                'center', False, None),
+            (2,  ten,                                                'left',   True,  None),
+            (3,  nd,                                                 'left',   False, None),
+            (4,  str(dr[3]).strip() if not pd.isna(dr[3]) else '',   'center', False, None),
+            (5,  float(dr[4]) if not pd.isna(dr[4]) else 0,         'right',  False, '#,##0'),
+            (6,  str(dr[5]).strip() if not pd.isna(dr[5]) else '',   'center', False, None),
+            (7,  str(dr[6]).strip() if not pd.isna(dr[6]) else '',   'left',   True,  None),
+            (8,  dr[7] if isinstance(dr[7], datetime.datetime)
+                 else ('' if pd.isna(dr[7]) else dr[7]),             'center', False, 'DD/MM/YYYY'),
+            (9,  float(dr[8]) if not pd.isna(dr[8]) else 0,         'right',  False, '#,##0'),
         ]
-        sl_tt = dr[10] if not pd.isna(dr.get(10, float('nan'))) else (dr[8] if not pd.isna(dr[8]) else 0)
-        try: sl_tt = float(sl_tt)
+        col10 = dr[10] if 10 in dr.index and not pd.isna(dr[10]) else (dr[8] if not pd.isna(dr[8]) else 0)
+        try: sl_tt = float(col10)
         except: sl_tt = 0
-        cols.append((9, sl_tt, 'right', False, '#,##0'))
+        cols.append((10, sl_tt, 'right', False, '#,##0'))
         for col, val, ha, wrap, fmt in cols:
             cl = ws.cell(row=rn, column=col, value=val)
             ap(cl, ds[col])
             cl.font = Font(name='Times New Roman', size=11)
             cl.alignment = Alignment(horizontal=ha, vertical='center', wrap_text=wrap)
             if fmt and val != '': cl.number_format = fmt
-        # Cột 10 (Hỏng) và 11 (Ghi chú) để trống
-        for c in (10, 11):
-            cc = ws.cell(row=rn, column=c, value='')
-            ap(cc, ds[c])
+        # Cột 11 (Hỏng) và 12 (Ghi chú) để trống
+        for c in (11, 12):
+            if c in ds:
+                cc = ws.cell(row=rn, column=c, value='')
+                ap(cc, ds[c])
 
     stt = 1
     for dr in drugs:
@@ -1051,14 +1495,20 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam):
     lbl.alignment = Alignment(horizontal='left', vertical='center')
     lbl.border = b_med()
     ws.cell(row=tr, column=1).border = b_med()
-    for c in range(3, 12):
+    for c in range(3, 13):
         ws.cell(row=tr, column=c).border = b_med()
     ws.row_dimensions[tr].height = 20
+
+    # Xóa nội dung dòng ngay sau Tổng khoản nếu là dòng trống/rác thừa
+    tr_next = tr + 1
+    next_vals = [ws.cell(row=tr_next, column=c).value for c in range(1, 13)]
+    if all(v is None or (isinstance(v, str) and not v.strip()) for v in next_vals):
+        ws.delete_rows(tr_next, 1)
 
     # ── Format vùng data ─────────────────────────────────────────────────────
     for r in range(DS, tr):
         ws.row_dimensions[r].height = bbkk_h(ws, r)
-        for col in range(1, 12):
+        for col in range(1, 13):
             cl = ws.cell(row=r, column=col)
             ha, va = BBKK_A.get(col, ('left', 'center'))
             safe_set(cl, fill=NO_FILL, border=b_thin(),
@@ -1066,21 +1516,55 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam):
                      alignment=Alignment(horizontal=ha, vertical=va, wrap_text=col in BBKK_WRAP))
             if col in BBKK_NUM and cl.value is not None and cl.value != '':
                 cl.number_format = '#,##0'
-            if col == 7 and isinstance(cl.value, datetime.datetime):
+            if col == 8 and isinstance(cl.value, datetime.datetime):
                 cl.number_format = 'DD/MM/YYYY'
 
     # ── Cập nhật footer: ngày ký biên bản (dòng cuối) ────────────────────────
-    # Tìm dòng có "Ngày" trong phần cuối
+    # Tìm dòng có "Ngày" hoặc "ngày" trong phần cuối
     for r in range(tr+1, min(tr+15, ws.max_row+1)):
         v = ws.cell(row=r, column=1).value
-        if v and isinstance(v, str) and 'Ngày' in v:
-            import re as _re2
-            ws.cell(row=r, column=1).value = _re2.sub(
-                r'Ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
-                f'Ngày {last_day} tháng {thang} năm {nam}',
+        if v and isinstance(v, str) and re.search(r'[Nn]gày', v):
+            ws.cell(row=r, column=1).value = re.sub(
+                r'[Nn]gày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
+                lambda m: f'{"Ngày" if m.group(0)[0]=="N" else "ngày"} {last_day} tháng {thang} năm {nam}',
                 v
             )
             break
+
+    # ── Sửa thứ tự: chức vụ phải ở TRÊN, tên ở DƯỚI ──────────────────────────
+    # Quét các cột chữ ký trong footer (cols 1,2,4,6,8,10...)
+    # Mẫu đúng: hàng chức vụ (DS CKII, Lê Xuân Bình...) → hàng để trống → hàng tên
+    # Nếu phát hiện tên (họ tên đầy đủ kiểu "Ds. Xxx", "DS CKII Xxx") ở trên
+    # và chức vụ text ngắn hơn ở dưới thì hoán vị
+    def _looks_like_title(s):
+        """Chuỗi là chức vụ/chức danh: không có dấu chấm họ tên, thường là từ khóa"""
+        kws = ['Trưởng', 'Phòng', 'Thống kê', 'Thủ kho', 'Hội đồng', 'TCKT', 'Dược']
+        return any(k in s for k in kws)
+    def _looks_like_name(s):
+        """Chuỗi là tên người: có 'Ds.', 'DS', hoặc >= 2 từ viết hoa"""
+        if re.match(r'^(Ds\.|DS|Ths\.|PGS|GS)', s.strip()): return True
+        words = s.strip().split()
+        return len(words) >= 2 and sum(1 for w in words if w and w[0].isupper()) >= 2
+
+    footer_start = tr + 1
+    footer_end   = ws.max_row
+    # Duyệt từng cột footer quan trọng
+    for col in range(1, ws.max_column + 1):
+        col_vals = {}
+        for r in range(footer_start, footer_end + 1):
+            v = ws.cell(row=r, column=col).value
+            if v and isinstance(v, str) and v.strip():
+                col_vals[r] = v.strip()
+        if len(col_vals) < 2:
+            continue
+        rows_sorted = sorted(col_vals.keys())
+        # Lấy 2 dòng đầu tiên có nội dung
+        r1, r2 = rows_sorted[0], rows_sorted[1]
+        v1, v2 = col_vals[r1], col_vals[r2]
+        # Nếu dòng trên là tên người, dòng dưới là chức vụ → hoán đổi
+        if _looks_like_name(v1) and _looks_like_title(v2):
+            ws.cell(row=r1, column=col).value = v2
+            ws.cell(row=r2, column=col).value = v1
 
     for col, w in BBKK_W.items():
         ws.column_dimensions[get_column_letter(col)].width = w
@@ -1104,15 +1588,22 @@ def update_xnt_dates(tmpl_bytes, thang, nam):
     ws = wb.active
     last_day = get_last_day(thang, nam)
     import re as _re
-    for r in range(1, min(15, ws.max_row+1)):
-        for c in range(1, ws.max_column+1):
+
+    def _replace_dates(v):
+        # Thay "Tháng X năm YYYY" hoặc "Tháng X Năm YYYY" (cả N hoa lẫn n thường)
+        v = _re.sub(r'Tháng\s+\d+\s+[Nn]ăm\s+\d+',
+                    lambda m: f'Tháng {thang} {"Năm" if "Năm" in m.group(0) else "năm"} {nam}', v)
+        # Thay "ngày X tháng Y năm Z" (chữ n thường hoặc N hoa)
+        v = _re.sub(r'[Nn]gày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
+                    lambda m: f'{"Ngày" if m.group(0)[0]=="N" else "ngày"} {last_day} tháng {thang} năm {nam}', v)
+        return v
+
+    # Quét toàn bộ sheet (header + footer đều cần cập nhật)
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
             v = ws.cell(row=r, column=c).value
             if not v or not isinstance(v, str): continue
-            # Thay "Tháng X năm YYYY"
-            new_v = _re.sub(r'Tháng\s+\d+\s+năm\s+\d+', f'Tháng {thang} năm {nam}', v)
-            # Thay ngày cuối tháng
-            new_v = _re.sub(r'ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
-                            f'ngày {last_day} tháng {thang} năm {nam}', new_v)
+            new_v = _replace_dates(v)
             if new_v != v:
                 ws.cell(row=r, column=c).value = new_v
     out = io.BytesIO(); wb.save(out); out.seek(0)
@@ -1125,13 +1616,18 @@ def update_bbkn_dates(tmpl_bytes, thang, nam):
     ws = wb.active
     last_day = get_last_day(thang, nam)
     import re as _re
-    for r in range(1, min(20, ws.max_row+1)):
-        for c in range(1, ws.max_column+1):
+
+    def _replace_dates(v):
+        v = _re.sub(r'Tháng\s+\d+\s+năm\s+\d+', f'Tháng {thang} năm {nam}', v)
+        v = _re.sub(r'[Nn]gày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
+                    lambda m: f'{"Ngày" if m.group(0)[0]=="N" else "ngày"} {last_day} tháng {thang} năm {nam}', v)
+        return v
+
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
             v = ws.cell(row=r, column=c).value
             if not v or not isinstance(v, str): continue
-            new_v = _re.sub(r'Tháng\s+\d+\s+năm\s+\d+', f'Tháng {thang} năm {nam}', v)
-            new_v = _re.sub(r'ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
-                            f'ngày {last_day} tháng {thang} năm {nam}', new_v)
+            new_v = _replace_dates(v)
             if new_v != v:
                 ws.cell(row=r, column=c).value = new_v
     out = io.BytesIO(); wb.save(out); out.seek(0)
@@ -1143,9 +1639,15 @@ def update_bbkn_dates(tmpl_bytes, thang, nam):
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <div class="hero">
-  <div class="badge">🏥 Bệnh viện Đà Nẵng · Khoa Dược</div>
-  <h1>HỆ THỐNG TỰ ĐỘNG HÓA<br>BIÊN BẢN DƯỢC</h1>
-  <p class="sub">Biên Bản Kiểm (BBKN · BBKK) &nbsp;·&nbsp; Xuất Nhập Tồn (XNT) &nbsp;·&nbsp; Đối Chiếu Dược</p>
+  <div class="badge">🏥 Bệnh viện Đà Nẵng &nbsp;·&nbsp; Khoa Dược</div>
+  <h1>HỆ THỐNG TỰ ĐỘNG HÓA<br><span>BIÊN BẢN DƯỢC</span></h1>
+  <p class="sub">Tự động hóa quy trình lập biên bản — chính xác, nhanh chóng, đúng chuẩn</p>
+  <div class="hero-pills">
+    <div class="hero-pill">📥 Kiểm Nhập (BBKN)</div>
+    <div class="hero-pill">🔎 Kiểm Kê (BBKK)</div>
+    <div class="hero-pill">📊 Xuất Nhập Tồn (XNT)</div>
+    <div class="hero-pill">🔍 Đối Chiếu Dược</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1188,7 +1690,7 @@ with tab_bienban:
 
         col1, col2 = st.columns(2)
         with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
-        with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xlsx"], key="bbkn_tpl")
+        with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xls","xlsx"], key="bbkn_tpl")
         st.markdown("<hr>", unsafe_allow_html=True)
 
         ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
@@ -1202,23 +1704,37 @@ with tab_bienban:
                     else:
                         raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
                     tpl_b = tpl_file_bbkn.read()
+                    # Nếu form chuẩn là .xls thì convert sang xlsx bytes
+                    if tpl_file_bbkn.name.endswith('.xls'):
+                        import xlrd, openpyxl as _oxl
+                        _xwb = xlrd.open_workbook(file_contents=tpl_b)
+                        _xws = _xwb.sheet_by_index(0)
+                        _nwb = _oxl.Workbook(); _nws = _nwb.active
+                        for _r in range(_xws.nrows):
+                            for _c in range(_xws.ncols):
+                                _nws.cell(row=_r+1,column=_c+1,value=_xws.cell_value(_r,_c))
+                        _tb=io.BytesIO(); _nwb.save(_tb); tpl_b=_tb.getvalue()
                     # Cập nhật tháng/năm trong form trước khi build
                     tpl_b = update_bbkn_dates(tpl_b, bbkn_thang, bbkn_nam)
                     companies, stats = parse_companies(raw_df, 9)
                     if not companies:
                         st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
                         st.stop()
-                    result = build_bbkn(tpl_b, companies)
-                    st.session_state.update(bbkn_result=result, bbkn_stats=stats,
-                                            bbkn_done=True, bbkn_thang=bbkn_thang, bbkn_nam=bbkn_nam)
+                    result, debug_rows_bbkn = build_bbkn(tpl_b, companies)
+                    st.session_state['bbkn_result']      = result
+                    st.session_state['bbkn_stats']       = stats
+                    st.session_state['bbkn_done']        = True
+                    st.session_state['bbkn_thang_val']   = bbkn_thang
+                    st.session_state['bbkn_nam_val']     = bbkn_nam
+                    st.session_state['bbkn_debug_rows']  = debug_rows_bbkn
                 except Exception as e:
                     st.error(f"❌ Lỗi: {e}"); st.exception(e)
 
         if st.session_state.get("bbkn_done"):
             stats  = st.session_state["bbkn_stats"]
             result = st.session_state["bbkn_result"]
-            _t = st.session_state.get("bbkn_thang", bbkn_thang)
-            _n = st.session_state.get("bbkn_nam", bbkn_nam)
+            _t = st.session_state.get("bbkn_thang_val", bbkn_thang)
+            _n = st.session_state.get("bbkn_nam_val",   bbkn_nam)
             fname  = f"BBKN_T{_t}_{_n}_HoanChinh.xlsx"
             st.markdown(f"""
             <div class="ok-box">
@@ -1233,6 +1749,18 @@ with tab_bienban:
             </div>""", unsafe_allow_html=True)
             st.download_button(label=f"⬇️ Tải File BBKN – {fname}", data=result, file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkn")
+            sw = stats.get('shift_warnings', [])
+            if sw:
+                st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(sw)} dòng lệch cột trong file HPT – đã tự căn chỉnh:</b><br>
+                {'<br>'.join(f'• {w}' for w in sw)}<br><br>
+                <b>Vui lòng kiểm tra lại các dòng này trong file xuất ra.</b>
+                </div>""", unsafe_allow_html=True)
+            dbg = st.session_state.get('bbkn_debug_rows', [])
+            if dbg:
+                st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(dbg)} dòng thiếu SL nhập (cột 9 trống) trong file HPT:</b><br>
+                {'<br>'.join(f'• <b>{d["ten"]}</b> {d["nd"]} — dữ liệu thô: {", ".join(d["sl_raw"])}' for d in dbg)}<br><br>
+                <b>Kiểm tra lại HPT: các dòng này có thể bị lệch cột hoặc HPT không xuất SL nhập.</b>
+                </div>""", unsafe_allow_html=True)
             st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Ngang · Fit All Columns on One Page</b>.
             Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
 
@@ -1253,7 +1781,7 @@ with tab_bienban:
 
         col1k, col2k = st.columns(2)
         with col1k: raw_file_bbkk = st.file_uploader("📂 File dữ liệu thô HPT (BBKK)", type=["xls","xlsx"], key="bbkk_raw")
-        with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xlsx"], key="bbkk_tpl")
+        with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xls","xlsx"], key="bbkk_tpl")
         st.markdown("<hr>", unsafe_allow_html=True)
 
         ready_bbkk = raw_file_bbkk is not None and tpl_file_bbkk is not None
@@ -1267,21 +1795,34 @@ with tab_bienban:
                     else:
                         raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
                     tpl_b_kk = tpl_file_bbkk.read()
+                    # Nếu form chuẩn là .xls thì convert sang xlsx bytes
+                    if tpl_file_bbkk.name.endswith('.xls'):
+                        import xlrd, openpyxl as _oxl2
+                        _xwb2 = xlrd.open_workbook(file_contents=tpl_b_kk)
+                        _xws2 = _xwb2.sheet_by_index(0)
+                        _nwb2 = _oxl2.Workbook(); _nws2 = _nwb2.active
+                        for _r2 in range(_xws2.nrows):
+                            for _c2 in range(_xws2.ncols):
+                                _nws2.cell(row=_r2+1,column=_c2+1,value=_xws2.cell_value(_r2,_c2))
+                        _tb2=io.BytesIO(); _nwb2.save(_tb2); tpl_b_kk=_tb2.getvalue()
                     drugs_kk, stats_kk = parse_bbkk_raw(raw_df_kk)
                     if not drugs_kk:
                         st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
                         st.stop()
                     result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam)
-                    st.session_state.update(bbkk_result=result_kk, bbkk_stats=stats_kk,
-                                            bbkk_done=True, bbkk_thang=bbkk_thang, bbkk_nam=bbkk_nam)
+                    st.session_state['bbkk_result'] = result_kk
+                    st.session_state['bbkk_stats']  = stats_kk
+                    st.session_state['bbkk_done']   = True
+                    st.session_state['bbkk_thang_val'] = bbkk_thang
+                    st.session_state['bbkk_nam_val']   = bbkk_nam
                 except Exception as e:
                     st.error(f"❌ Lỗi: {e}"); st.exception(e)
 
         if st.session_state.get("bbkk_done"):
             stats_kk2  = st.session_state["bbkk_stats"]
             result_kk2 = st.session_state["bbkk_result"]
-            _tk = st.session_state.get("bbkk_thang", bbkk_thang)
-            _nk = st.session_state.get("bbkk_nam", bbkk_nam)
+            _tk = st.session_state.get("bbkk_thang_val", bbkk_thang)
+            _nk = st.session_state.get("bbkk_nam_val",   bbkk_nam)
             fname_kk = f"BBKK_T{_tk}_{_nk}_HoanChinh.xlsx"
             st.markdown(f"""
             <div class="ok-box">
@@ -1317,32 +1858,51 @@ with tab_xnt_main:
             value=2026, key="xnt_nam")
 
     col1x, col2x = st.columns(2)
-    with col1x: raw_file_xnt = st.file_uploader("📂 File dữ liệu thô HPT (XNT)", type=["xlsx"], key="xnt_raw")
-    with col2x: tpl_file_xnt = st.file_uploader("📄 File form chuẩn XNT", type=["xlsx"], key="xnt_tpl")
+    with col1x: raw_file_xnt = st.file_uploader("📂 File dữ liệu thô HPT (XNT)", type=["xls","xlsx"], key="xnt_raw")
+    with col2x: tpl_file_xnt = st.file_uploader("📄 File form chuẩn XNT", type=["xls","xlsx"], key="xnt_tpl")
     st.markdown("<hr>", unsafe_allow_html=True)
 
     ready_xnt_main = raw_file_xnt is not None and tpl_file_xnt is not None
     if st.button("⚡ Bắt đầu xử lý XNT", disabled=not ready_xnt_main, key="btn_xnt_main"):
         with st.spinner("Đang xử lý XNT..."):
             try:
-                raw_df2 = pd.read_excel(io.BytesIO(raw_file_xnt.read()), sheet_name=0, header=None)
+                raw_b_xnt = raw_file_xnt.read()
+                if raw_file_xnt.name.endswith('.xls'):
+                    try:    raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None,engine='xlrd')
+                    except: raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None)
+                else:
+                    raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None)
                 tpl_b2  = tpl_file_xnt.read()
+                # Nếu form chuẩn là .xls thì convert sang bytes bình thường (openpyxl sẽ lỗi với .xls)
+                if tpl_file_xnt.name.endswith('.xls'):
+                    import xlrd, openpyxl
+                    xls_wb = xlrd.open_workbook(file_contents=tpl_b2)
+                    xls_ws = xls_wb.sheet_by_index(0)
+                    new_wb = openpyxl.Workbook()
+                    new_ws = new_wb.active
+                    for r in range(xls_ws.nrows):
+                        for c in range(xls_ws.ncols):
+                            new_ws.cell(row=r+1, column=c+1, value=xls_ws.cell_value(r,c))
+                    tmp_buf = io.BytesIO(); new_wb.save(tmp_buf); tpl_b2 = tmp_buf.getvalue()
                 # Cập nhật tháng/năm trong form
                 tpl_b2 = update_xnt_dates(tpl_b2, xnt_thang, xnt_nam)
                 companies2, stats2 = parse_companies(raw_df2, 12)
                 if not companies2:
                     st.error("❌ Không tìm thấy dữ liệu hợp lệ."); st.stop()
                 result2 = build_xnt(tpl_b2, companies2)
-                st.session_state.update(xnt_main_result=result2, xnt_main_stats=stats2,
-                                        xnt_main_done=True, xnt_main_thang=xnt_thang, xnt_main_nam=xnt_nam)
+                st.session_state['xnt_main_result']    = result2
+                st.session_state['xnt_main_stats']     = stats2
+                st.session_state['xnt_main_done']      = True
+                st.session_state['xnt_main_thang_val'] = xnt_thang
+                st.session_state['xnt_main_nam_val']   = xnt_nam
             except Exception as e:
                 st.error(f"❌ Lỗi: {e}"); st.exception(e)
 
     if st.session_state.get("xnt_main_done"):
         stats2  = st.session_state["xnt_main_stats"]
         result2 = st.session_state["xnt_main_result"]
-        _tx = st.session_state.get("xnt_main_thang", xnt_thang)
-        _nx = st.session_state.get("xnt_main_nam", xnt_nam)
+        _tx = st.session_state.get("xnt_main_thang_val", xnt_thang)
+        _nx = st.session_state.get("xnt_main_nam_val",   xnt_nam)
         fname2  = f"XNT_T{_tx}_{_nx}_HoanChinh.xlsx"
         st.markdown(f"""
         <div class="ok-box">
