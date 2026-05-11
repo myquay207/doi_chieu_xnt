@@ -536,6 +536,7 @@ def dc_parse_tk(df_raw):
             'nd_tk':   str(row[8]).strip() if not pd.isna(row[8]) else '',
             'gia_tk':  gia,
             'nhap_tk': dc_safe_float(row[14]),
+            'xuat_tk': dc_safe_float(row[16]),   # ← Xuất BH T4.26 (col 16)
             'ton_tk':  dc_safe_float(row[24]),
             'kten': dc_norm(ten),
             'knd':  dc_norm(str(row[8]) if not pd.isna(row[8]) else ''),
@@ -709,7 +710,8 @@ def dc_run_xnt(dfs_nx, df_xnt_raw, df_tk_raw):
             'stt': stt, 'ten': str(row[2]).strip(),
             'nd':  str(row[3]).strip() if not pd.isna(row[3]) else '',
             'gia': row[8] if not pd.isna(row[8]) else 0,
-            'ton_xnt': dc_safe_float(row[12]),
+            'xuat_xnt': dc_safe_float(row[11]),  # Thực Xuất col 11
+            'ton_xnt':  dc_safe_float(row[12]),
             'kten': dc_norm(str(row[2])),
             'knd':  dc_norm(str(row[3]) if not pd.isna(row[3]) else ''),
             'kgia': int(round(float(row[8]))) if not pd.isna(row[8]) else 0,
@@ -720,15 +722,20 @@ def dc_run_xnt(dfs_nx, df_xnt_raw, df_tk_raw):
     results = []; used_tk = set()
 
     def make_row(xr, tr, method):
+        ton_cl  = (xr['ton_xnt']  - tr['ton_tk'])  if tr is not None else None
+        xuat_cl = (xr['xuat_xnt'] - tr['xuat_tk']) if tr is not None else None
         return {
             'ma': tr['ma'] if tr is not None else '',
             'ten': xr['ten'], 'nd': xr['nd'], 'gia': xr['gia'],
-            'ton_xnt': xr['ton_xnt'],
-            'ten_tk': tr['ten_tk'] if tr is not None else '',
-            'nd_tk':  tr['nd_tk']  if tr is not None else '',
-            'ton_tk': tr['ton_tk'] if tr is not None else None,
+            'xuat_xnt': xr['xuat_xnt'],
+            'ton_xnt':  xr['ton_xnt'],
+            'ten_tk':   tr['ten_tk']  if tr is not None else '',
+            'nd_tk':    tr['nd_tk']   if tr is not None else '',
+            'xuat_tk':  tr['xuat_tk'] if tr is not None else None,
+            'ton_tk':   tr['ton_tk']  if tr is not None else None,
             'method': method,
-            'cl': (xr['ton_xnt'] - tr['ton_tk']) if tr is not None else None,
+            'cl':      ton_cl,
+            'cl_xuat': xuat_cl,
         }
 
     for (kten, knd, kgia), grp_x in df_xnt.groupby(['kten', 'knd', 'kgia'], sort=False):
@@ -766,12 +773,13 @@ def dc_run_xnt(dfs_nx, df_xnt_raw, df_tk_raw):
                     results.append(make_row(xr, None, 'no_tk'))
 
     for idx, tr in df_tk.iterrows():
-        if idx not in used_tk and abs(tr['ton_tk']) >= 0.01:
+        if idx not in used_tk and (abs(tr['ton_tk']) >= 0.01 or tr['xuat_tk'] > 0):
             results.append({
                 'ma': tr['ma'], 'ten': '', 'nd': '', 'gia': '',
-                'ton_xnt': None, 'ten_tk': tr['ten_tk'],
-                'nd_tk': tr['nd_tk'], 'ton_tk': tr['ton_tk'],
-                'method': 'no_xnt', 'cl': None,
+                'xuat_xnt': None, 'ton_xnt': None,
+                'ten_tk': tr['ten_tk'],
+                'nd_tk': tr['nd_tk'], 'xuat_tk': tr['xuat_tk'], 'ton_tk': tr['ton_tk'],
+                'method': 'no_xnt', 'cl': None, 'cl_xuat': None,
             })
 
     return pd.DataFrame(results), None
@@ -837,33 +845,52 @@ FOR = PatternFill('solid', fgColor='FCE4D6')
 
 def dc_build_xnt_sheets(wb, df_res, tn):
     ws = wb.create_sheet(f"DC XNT {tn.replace('/','_')}")
-    _dc_hdr(ws, [('Mã HPT',16),('Tên thuốc (HPT)',32),('Tên thuốc (TK)',28),
-              ('Nồng độ',22),('Đơn giá',12),('Tồn cuối HPT',13),
-              ('Tồn cuối TK',13),('Chênh lệch',13),('Trạng thái',25),('Phương pháp',18)])
+    _dc_hdr(ws, [
+        ('Mã HPT',16),('Tên thuốc (HPT)',32),('Tên thuốc (TK)',28),
+        ('Nồng độ',22),('Đơn giá',12),
+        ('Xuất HPT',13),('Xuất TK',13),('CL Xuất',13),
+        ('Tồn cuối HPT',13),('Tồn cuối TK',13),('CL Tồn',13),
+        ('Trạng thái Tồn',20),('Trạng thái Xuất',20),('Phương pháp',18)])
     mm = {'1-1':'Chính xác','exact_ton':'Khớp tồn','nearest_ton':'Gần nhất ⚠️'}
     df_m = df_res[df_res['cl'].notna()]
     df_l = df_m[df_m['cl'].abs()>=0.01].sort_values('cl')
     df_k = df_m[df_m['cl'].abs()<0.01]
     for ri,(_, r) in enumerate(pd.concat([df_l,df_k],ignore_index=True).iterrows(), 2):
-        cl = r['cl']
-        if abs(cl)<0.01:  fill,st = FOK,'✅ Khớp'
-        elif cl>0:         fill,st = FLE,f'⬆️ HPT cao hơn {cl:+.0f}'
-        else:              fill,st = FLE,f'⬇️ HPT thấp hơn {cl:+.0f}'
-        if r['method']=='nearest_ton' and abs(cl)>=0.01: fill=FWA
-        _dc_row(ws,ri,[r['ma'],r['ten'],r.get('ten_tk',''),r['nd'],r['gia'],
-                    r['ton_xnt'],r['ton_tk'],cl,st,mm.get(r['method'],'')],
-             fill,right_cols=(5,6,7,8),center_cols=(1,9,10))
+        cl      = r['cl']
+        cl_xuat = r.get('cl_xuat', None)
+        # Trạng thái tồn cuối
+        if   abs(cl)<0.01:          fill_ton, st_ton = FOK, '✅ Tồn khớp'
+        elif cl>0:                   fill_ton, st_ton = FLE, f'⬆️ HPT cao hơn {cl:+.0f}'
+        else:                        fill_ton, st_ton = FLE, f'⬇️ HPT thấp hơn {cl:+.0f}'
+        if r['method']=='nearest_ton' and abs(cl)>=0.01: fill_ton = FWA
+        # Trạng thái xuất
+        if cl_xuat is None:          st_xuat = ''
+        elif abs(cl_xuat)<0.01:      st_xuat = '✅ Xuất khớp'
+        elif cl_xuat>0:              st_xuat = f'⬆️ HPT cao hơn {cl_xuat:+.0f}'
+        else:                        st_xuat = f'⬇️ HPT thấp hơn {cl_xuat:+.0f}'
+        # Màu tổng hợp: nếu cả xuất lẫn tồn đều khớp → xanh, còn lại → màu tồn
+        fill = FOK if (abs(cl)<0.01 and (cl_xuat is None or abs(cl_xuat)<0.01)) else fill_ton
+        _dc_row(ws, ri, [
+                r['ma'], r['ten'], r.get('ten_tk',''), r['nd'], r['gia'],
+                r.get('xuat_xnt'), r.get('xuat_tk'), cl_xuat,
+                r['ton_xnt'], r['ton_tk'], cl,
+                st_ton, st_xuat, mm.get(r['method'],'')],
+             fill, right_cols=(5,6,7,8,9,10,11), center_cols=(1,12,13,14))
     ws.freeze_panes='A2'
     ws2 = wb.create_sheet("XNT – HPT có, TK không")
-    _dc_hdr(ws2,[('Mã HPT',16),('Tên thuốc HPT',35),('Nồng độ',25),('Đơn giá',12),('Tồn HPT',12),('Ghi chú',35)])
+    _dc_hdr(ws2,[('Mã HPT',16),('Tên thuốc HPT',35),('Nồng độ',25),('Đơn giá',12),
+                 ('Xuất HPT',12),('Tồn HPT',12),('Ghi chú',35)])
     for ri,(_, r) in enumerate(df_res[df_res['method']=='no_tk'].iterrows(), 2):
-        _dc_row(ws2,ri,[r['ma'],r['ten'],r['nd'],r['gia'],r['ton_xnt'],'HPT có nhưng TK không theo dõi'],
-             FBL,right_cols=(3,4,5))
+        _dc_row(ws2,ri,[r['ma'],r['ten'],r['nd'],r['gia'],
+                        r.get('xuat_xnt'),r['ton_xnt'],'HPT có nhưng TK không theo dõi'],
+             FBL,right_cols=(4,5,6))
     ws3 = wb.create_sheet("XNT – TK có, HPT không")
-    _dc_hdr(ws3,[('Mã HPT',16),('Tên thuốc TK',35),('Nồng độ TK',25),('Tồn TK',12),('Ghi chú',35)])
+    _dc_hdr(ws3,[('Mã HPT',16),('Tên thuốc TK',35),('Nồng độ TK',25),
+                 ('Xuất TK',12),('Tồn TK',12),('Ghi chú',35)])
     for ri,(_, r) in enumerate(df_res[df_res['method']=='no_xnt'].iterrows(), 2):
-        _dc_row(ws3,ri,[r['ma'],r['ten_tk'],r['nd_tk'],r['ton_tk'],'TK có nhưng HPT không phát sinh'],
-             FOR,right_cols=(4,))
+        _dc_row(ws3,ri,[r['ma'],r['ten_tk'],r['nd_tk'],
+                        r.get('xuat_tk'),r['ton_tk'],'TK có nhưng HPT không phát sinh'],
+             FOR,right_cols=(4,5))
 
 def dc_build_kn_sheets(wb, df_res, tn):
     ws = wb.create_sheet(f"DC Kiểm nhập {tn.replace('/','_')}")
@@ -927,21 +954,32 @@ def dc_build_kk_sheets(wb, df_res, tn):
 
 def dc_build_summary(wb, results_map, tn):
     ws = wb.create_sheet("📊 Tóm tắt", 0)
-    ws.column_dimensions['A'].width = 40; ws.column_dimensions['B'].width = 18
+    ws.column_dimensions['A'].width = 45; ws.column_dimensions['B'].width = 18
     def wr(ri,k,v,bold=False):
         c1=ws.cell(row=ri,column=1,value=k); c2=ws.cell(row=ri,column=2,value=v)
         c1.font=Font(name='Times New Roman',bold=bold,size=12 if bold else 11)
         c2.font=Font(name='Times New Roman',size=11)
     ri=1; wr(ri,f'BÁO CÁO ĐỐI CHIẾU DƯỢC – {tn}','',bold=True); ri+=2
-    for label,df_r,col_cl,col_st,no_vals,no_labels in results_map:
+    for item in results_map:
+        label,df_r,col_cl,col_st,no_vals,no_labels = item[:6]
+        extra_cl = item[6] if len(item) > 6 else None  # optional extra CL col (vd: cl_xuat)
+        extra_label = item[7] if len(item) > 7 else None
         wr(ri,f'── {label} ──','',bold=True); ri+=1
         if df_r is not None and col_cl:
             m=df_r[df_r[col_cl].notna()]
             nk=(m[col_cl].abs()<0.01).sum(); nl=(m[col_cl].abs()>=0.01).sum()
             pct=nk/(nk+nl)*100 if (nk+nl)>0 else 0
-            wr(ri,'  ✅ Khớp hoàn toàn',f'{nk} dòng'); ri+=1
-            wr(ri,'  ⚠️  Chênh lệch',f'{nl} dòng'); ri+=1
-            wr(ri,'  📊 Tỷ lệ khớp',f'{pct:.1f}%'); ri+=1
+            wr(ri,'  ✅ Tồn cuối – Khớp',f'{nk} dòng'); ri+=1
+            wr(ri,'  ⚠️  Tồn cuối – Chênh lệch',f'{nl} dòng'); ri+=1
+            wr(ri,'  📊 Tỷ lệ tồn khớp',f'{pct:.1f}%'); ri+=1
+        if extra_cl and df_r is not None and extra_cl in df_r.columns:
+            mx=df_r[df_r[extra_cl].notna()]
+            nkx=(mx[extra_cl].abs()<0.01).sum(); nlx=(mx[extra_cl].abs()>=0.01).sum()
+            pctx=nkx/(nkx+nlx)*100 if (nkx+nlx)>0 else 0
+            lbl = extra_label or extra_cl
+            wr(ri,f'  ✅ {lbl} – Khớp',f'{nkx} dòng'); ri+=1
+            wr(ri,f'  ⚠️  {lbl} – Chênh lệch',f'{nlx} dòng'); ri+=1
+            wr(ri,f'  📊 Tỷ lệ {lbl.lower()} khớp',f'{pctx:.1f}%'); ri+=1
         if df_r is not None and col_st:
             for nv,nl2 in zip(no_vals,no_labels):
                 cnt=(df_r[col_st]==nv).sum()
@@ -956,7 +994,8 @@ def dc_export_excel(res_xnt, res_kn, res_kk, tn):
     rm=[]
     if res_xnt is not None:
         rm.append(('Đối chiếu XNT',res_xnt,'cl','method',
-                   ['no_tk','no_xnt'],['HPT có – TK không','TK có – HPT không']))
+                   ['no_tk','no_xnt'],['HPT có – TK không','TK có – HPT không'],
+                   'cl_xuat','Xuất kho'))
     if res_kn is not None:
         rm.append(('Đối chiếu Kiểm nhập',res_kn,'cl','status',
                    ['hpt_no_tk','tk_no_hpt'],['HPT có – TK không','TK có – HPT không']))
@@ -1775,12 +1814,22 @@ with tab_dc:
               <div class="stat-card"><div class="num" style="color:#2563a8">{len(dn_tk)}</div><div class="lbl">HPT có – TK không</div></div>
               <div class="stat-card"><div class="num" style="color:#d97706">{len(dn_xnt)}</div><div class="lbl">TK có – HPT không</div></div>
             </div>""", unsafe_allow_html=True)
-            dl = dm[dm['cl'].abs()>=0.01].sort_values('cl')
+            # Thống kê riêng cho xuất
+            nk_xuat = (dm['cl_xuat'].abs()<0.01).sum() if 'cl_xuat' in dm.columns else 0
+            nl_xuat = (dm['cl_xuat'].abs()>=0.01).sum() if 'cl_xuat' in dm.columns else 0
+            st.markdown(f"""<div class="stat-grid">
+              <div class="stat-card"><div class="num" style="color:#166534">{nk_xuat}</div><div class="lbl">✅ Xuất khớp</div></div>
+              <div class="stat-card"><div class="num" style="color:#dc2626">{nl_xuat}</div><div class="lbl">⚠️ Xuất chênh lệch</div></div>
+            </div>""", unsafe_allow_html=True)
+            dl = dm[(dm['cl'].abs()>=0.01) | (dm.get('cl_xuat', 0).abs()>=0.01)].sort_values('cl')
             if len(dl):
-                st.markdown(f"**⚠️ {nl} dòng chênh lệch:**")
-                st.dataframe(dl[['ma','ten','nd','ton_xnt','ton_tk','cl']].rename(columns={
+                st.markdown(f"**⚠️ {len(dl)} dòng có chênh lệch (xuất hoặc tồn):**")
+                cols_show = ['ma','ten','nd','xuat_xnt','xuat_tk','cl_xuat','ton_xnt','ton_tk','cl']
+                cols_show = [c for c in cols_show if c in dl.columns]
+                st.dataframe(dl[cols_show].rename(columns={
                     'ma':'Mã HPT','ten':'Tên thuốc','nd':'Nồng độ',
-                    'ton_xnt':'Tồn HPT','ton_tk':'Tồn TK','cl':'Chênh lệch'}),
+                    'xuat_xnt':'Xuất HPT','xuat_tk':'Xuất TK','cl_xuat':'CL Xuất',
+                    'ton_xnt':'Tồn HPT','ton_tk':'Tồn TK','cl':'CL Tồn'}),
                     use_container_width=True, hide_index=True)
 
     # ── SUB-TAB: KIỂM NHẬP ────────────────────────────────────────────────────
