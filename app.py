@@ -1,7 +1,11 @@
 """
 HỆ THỐNG TỰ ĐỘNG HÓA BIÊN BẢN DƯỢC – Bệnh viện Đà Nẵng
 Hỗ trợ: BBKN · BBKK · XNT · Đối Chiếu Dược (XNT, Kiểm nhập, Kiểm kê)
-v8 – Hỗ trợ upload .xls cho tất cả form + tự động phát hiện/căn chỉnh dòng lệch cột (fix Ramipril-type bug)
+v10 – Tích hợp 3 hướng cảnh báo & cập nhật Số lô / Hạn dùng:
+  Hướng 1: Cảnh báo hết hạn / cận hạn ngay trên Streamlit UI (bảng màu đỏ/vàng)
+  Hướng 2: Tô màu ô Hạn dùng trong file Excel xuất (đỏ=hết hạn, vàng=cận hạn)
+  Hướng 3: Cập nhật Số lô + Hạn dùng mới nhất từ file dữ liệu thô nhập tháng
+            (join qua Số HĐ → Mã HPT, fallback Tên+Nồng độ+Đơn giá; ưu tiên lô hạn xa nhất)
 """
 
 import io, math, copy, datetime, re, warnings
@@ -83,6 +87,151 @@ NO_FILL = PatternFill(fill_type=None)
 
 def b_thin(): return Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 def b_med():  return Border(left=THIN, right=THIN, top=MED,  bottom=MED)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HƯỚNG 1+2: Fill màu cảnh báo hạn dùng
+# ══════════════════════════════════════════════════════════════════════════════
+F_EXPIRED  = PatternFill('solid', fgColor='FF4C4C')   # đỏ  = hết hạn
+F_NEAR_EXP = PatternFill('solid', fgColor='FFD700')   # vàng = cận hạn (<180 ngày)
+
+def _to_date(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)): return None
+    if isinstance(val, datetime.datetime): return val.date()
+    if isinstance(val, datetime.date): return val
+    return None
+
+def expiry_fill(han_val):
+    """Trả về PatternFill phù hợp cho ô Hạn dùng, hoặc None nếu bình thường."""
+    d = _to_date(han_val)
+    if d is None: return None
+    days = (d - datetime.date.today()).days
+    if days < 0: return F_EXPIRED
+    if days < 180: return F_NEAR_EXP
+    return None
+
+def check_expiry_warnings(items, mode='companies'):
+    """
+    Quét danh sách thuốc, trả về (expired_list, near_list).
+    mode='companies' : items = [(name, [rows])]  – BBKN / XNT
+    mode='drugs'     : items = [row]             – BBKK
+    """
+    today  = datetime.date.today()
+    expired, near = [], []
+    def _check(dr, company='', is_bbkk=False):
+        han_raw = dr[7] if not pd.isna(dr[7]) else None
+        d = _to_date(han_raw)
+        if d is None: return
+        ten_idx = 1 if is_bbkk else 2
+        ten = str(dr[ten_idx]).strip() if not pd.isna(dr[ten_idx]) else '?'
+        lo  = str(dr[5]).strip()       if not pd.isna(dr[5])       else ''
+        days = (d - today).days
+        info = {'ten': ten, 'lo': lo, 'han_str': d.strftime('%d/%m/%Y'),
+                'days': days, 'company': company}
+        if days < 0: expired.append(info)
+        elif days < 180: near.append(info)
+    if mode == 'companies':
+        for name, drugs in items:
+            for dr in drugs: _check(dr, company=name, is_bbkk=False)
+    else:
+        for dr in items: _check(dr, company='', is_bbkk=True)
+    return expired, near
+
+def show_expiry_warnings(expired, near, label=''):
+    """Hiển thị bảng cảnh báo trên Streamlit UI (Hướng 1)."""
+    if not expired and not near: return
+    prefix = f' ({label})' if label else ''
+    if expired:
+        st.error(f"🚨 **{len(expired)} thuốc ĐÃ HẾT HẠN{prefix}** — cần xử lý trước khi xuất báo cáo!")
+        df_exp = pd.DataFrame(expired)[['ten','lo','han_str','days','company']]
+        df_exp.columns = ['Tên thuốc','Số lô','Hạn dùng','Số ngày quá hạn','Công ty']
+        df_exp['Số ngày quá hạn'] = df_exp['Số ngày quá hạn'].abs()
+        st.dataframe(df_exp, use_container_width=True, hide_index=True)
+    if near:
+        st.warning(f"⚠️ **{len(near)} thuốc CẬN HẠN{prefix}** (còn dưới 180 ngày) — lưu ý khi xuất!")
+        df_near = pd.DataFrame(near)[['ten','lo','han_str','days','company']]
+        df_near.columns = ['Tên thuốc','Số lô','Hạn dùng','Còn lại (ngày)','Công ty']
+        st.dataframe(df_near, use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HƯỚNG 3: Build bảng tra Số lô + Hạn dùng từ file dữ liệu thô nhập tháng
+# ══════════════════════════════════════════════════════════════════════════════
+def _dc_norm_local(s):
+    if not isinstance(s, str): return ''
+    s = s.strip().lower()
+    s = re.sub(r'_x000a_', ' ', s); s = re.sub(r'\n', ' ', s)
+    s = re.sub(r'[#]', '', s)
+    s = re.sub(r'(\d),(\d)', r'\1.\2', s)
+    s = re.sub(r'(\d)\s+(mg|ml|mcg|μg|g|iu|%|meq|l)', r'\1\2', s)
+    s = re.sub(r'\s*\+\s*', '+', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+def build_lot_map(df_dulieutho, df_nhap_trong_thang):
+    """
+    Xây dựng 2 bảng tra Số lô + Hạn dùng mới nhất (hạn xa nhất – FEFO tồn cuối):
+      ma_map    : mã_HPT           → {'lo', 'han', 'han_d'}
+      fuzzy_map : (tên_n,nd_n,gia) → {'lo', 'han', 'han_d'}
+
+    Join logic:
+      1. df_nhap_trong_thang: Số HĐ (col9) → Mã HPT (col1)
+      2. df_dulieutho: Số HĐ (col1) → tra Mã HPT → vào ma_map
+         đồng thời → fuzzy_map (fallback Tên+Nồng độ+Đơn giá)
+      3. Giữ entry có hạn dùng xa nhất cho mỗi key
+    """
+    if df_dulieutho is None or df_nhap_trong_thang is None:
+        return {}, {}
+    # Bước 1: Số HĐ → Mã HPT
+    hd_to_ma = {}
+    for _, row in df_nhap_trong_thang.iterrows():
+        try: int(str(row[0]).strip())
+        except: continue
+        if pd.isna(row[1]) or pd.isna(row[9]): continue
+        hd_to_ma[str(row[9]).strip()] = str(row[1]).strip()
+    # Bước 2+3: quét dulieutho
+    ma_map    = {}
+    fuzzy_map = {}
+    for _, row in df_dulieutho.iterrows():
+        try: int(str(row[0]).strip())
+        except: continue
+        if pd.isna(row[2]): continue
+        ten = str(row[2]).strip()
+        nd  = str(row[3]).strip() if not pd.isna(row[3]) else ''
+        lo  = str(row[5]).strip() if not pd.isna(row[5]) else ''
+        han = row[7]
+        gia = float(row[8]) if not pd.isna(row[8]) else 0
+        hd  = str(row[1]).strip() if not pd.isna(row[1]) else ''
+        if not lo: continue
+        han_d = _to_date(han)
+        if han_d is None: continue
+        # Map theo Mã HPT
+        ma = hd_to_ma.get(hd, '')
+        if ma:
+            ex = ma_map.get(ma)
+            if not ex or han_d > ex['han_d']:
+                ma_map[ma] = {'lo': lo, 'han': han, 'han_d': han_d}
+        # Map fuzzy
+        fkey = (_dc_norm_local(ten), _dc_norm_local(nd), int(round(gia)) if gia else 0)
+        exf = fuzzy_map.get(fkey)
+        if not exf or han_d > exf['han_d']:
+            fuzzy_map[fkey] = {'lo': lo, 'han': han, 'han_d': han_d, 'ma': ma}
+    return ma_map, fuzzy_map
+
+def apply_lot_map(lo_raw, han_raw, ten, nd, gia, ma_hpt, ma_map, fuzzy_map):
+    """
+    Tra bảng để lấy Số lô + Hạn dùng mới nhất.
+    Ưu tiên: Mã HPT → fuzzy → giữ nguyên.
+    Chỉ cập nhật nếu thuốc có trong bảng nhập tháng.
+    Trả về: (lo_final, han_final, updated: bool)
+    """
+    if ma_hpt and ma_hpt in ma_map:
+        e = ma_map[ma_hpt]
+        return e['lo'], e['han'], True
+    fkey = (_dc_norm_local(str(ten) if ten else ''),
+            _dc_norm_local(str(nd)  if nd  else ''),
+            int(round(float(gia))) if gia else 0)
+    if fkey in fuzzy_map:
+        e = fuzzy_map[fkey]
+        return e['lo'], e['han'], True
+    return lo_raw, han_raw, False
 
 def safe_set(cell, **kwargs):
     for k, v in kwargs.items():
@@ -181,7 +330,7 @@ def bbkn_h(ws, r):
         ml = max(ml, sum(max(1,math.ceil(len(ln)/cw)) for ln in v.split('\n')))
     return max(22, min(ml*15.6+4, 120))
 
-def build_bbkn(tmpl_bytes, companies):
+def build_bbkn(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
     wb = load_workbook(io.BytesIO(tmpl_bytes))
     ws = wb.active
 
@@ -234,16 +383,28 @@ def build_bbkn(tmpl_bytes, companies):
         ws.row_dimensions[rn].height = 20
 
     def wdr(rn, stt, dr):
+        # Hướng 3: tra bảng lô/hạn mới nhất từ file nhập tháng
+        ten_raw = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
+        nd_raw  = str(dr[3]).strip() if not pd.isna(dr[3]) else ''
+        gia_raw = float(dr[8]) if not pd.isna(dr[8]) else 0
+        lo_raw  = str(dr[5]).strip() if not pd.isna(dr[5]) else ''
+        han_raw = dr[7] if not pd.isna(dr[7]) else ''
+        ma_hpt  = str(dr[1]).strip() if not pd.isna(dr[1]) else ''
+        if ma_map is not None:
+            lo_use, han_use, _ = apply_lot_map(
+                lo_raw, han_raw, ten_raw, nd_raw, gia_raw, ma_hpt, ma_map, fuzzy_map or {})
+        else:
+            lo_use, han_use = lo_raw, han_raw
         cols = [
             (1, stt,                                               'center', False, None),
             (2, ''if pd.isna(dr[1])else str(dr[1]).strip(),       'center', False, None),
-            (3, ''if pd.isna(dr[2])else str(dr[2]).strip(),       'left',   True,  None),
-            (4, ''if pd.isna(dr[3])else str(dr[3]).strip(),       'left',   True,  None),
+            (3, ten_raw,                                           'left',   True,  None),
+            (4, nd_raw,                                            'left',   True,  None),
             (5, ''if pd.isna(dr[4])else str(dr[4]).strip(),       'center', False, None),
-            (6, ''if pd.isna(dr[5])else str(dr[5]).strip(),       'center', False, None),
+            (6, lo_use,                                            'center', False, None),
             (7, ''if pd.isna(dr[6])else str(dr[6]).strip(),       'left',   True,  None),
-            (8, dr[7] if isinstance(dr[7],datetime.datetime)
-                else(''if pd.isna(dr[7])else dr[7]),              'center', False, 'DD/MM/YYYY'),
+            (8, han_use if isinstance(han_use, datetime.datetime)
+                else('' if han_use=='' else han_use),             'center', False, 'DD/MM/YYYY'),
             (9, dr[8] if not pd.isna(dr[8]) else 0,              'right',  False, '#,##0'),
             (10,int(dr[9]) if not pd.isna(dr[9]) else 0,         'right',  False, '#,##0'),
         ]
@@ -252,6 +413,9 @@ def build_bbkn(tmpl_bytes, companies):
             cl.font = Font(name='Times New Roman',size=12)
             cl.alignment = Alignment(horizontal=ha,vertical='center',wrap_text=wrap)
             if fmt and val!='': cl.number_format = fmt
+        # Hướng 2: tô màu ô Hạn dùng (cột 8)
+        ef = expiry_fill(han_use)
+        if ef: ws.cell(row=rn, column=8).fill = ef
         ck = ws.cell(row=rn,column=11,value=f'=I{rn}*J{rn}'); ap(ck,ds[11])
         ck.font=Font(name='Times New Roman',size=12)
         ck.alignment=Alignment(horizontal='right',vertical='center')
@@ -363,7 +527,7 @@ def xnt_h(ws,r):
         ml=max(ml,sum(max(1,math.ceil(len(ln)/cw)) for ln in v.split('\n')))
     return max(20,min(ml*14.3+4,120))
 
-def build_xnt(tmpl_bytes, companies):
+def build_xnt(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
     wb=load_workbook(io.BytesIO(tmpl_bytes))
     ws=wb.active
     cs={c:gs(ws,12,c) for c in range(1,15)}
@@ -400,15 +564,28 @@ def build_xnt(tmpl_bytes, companies):
         ws.row_dimensions[rn].height=18
 
     def wdr(rn,stt,dr):
+        # Hướng 3: cập nhật Số lô (col5) và Hạn dùng (col7) từ bảng nhập tháng
+        # XNT: col2=Tên, col3=NồngĐộ, col5=SốLô, col6=HãngSX, col7=HạnDùng, col8=ĐơnGiá
+        # Mã HPT không có trong XNT HPT nên chỉ dùng fuzzy fallback
+        ten_raw = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
+        nd_raw  = str(dr[3]).strip() if not pd.isna(dr[3]) else ''
+        gia_raw = float(dr[8]) if not pd.isna(dr[8]) else 0
+        lo_raw  = str(dr[5]).strip() if not pd.isna(dr[5]) else ''
+        han_raw = dr[7] if not pd.isna(dr[7]) else ''
+        if ma_map is not None:
+            lo_use, han_use, _ = apply_lot_map(
+                lo_raw, han_raw, ten_raw, nd_raw, gia_raw, '', ma_map, fuzzy_map or {})
+        else:
+            lo_use, han_use = lo_raw, han_raw
         cols=[
             (1, stt,                                                    'center',False,None),
-            (2, ''if pd.isna(dr[2])else str(dr[2]).strip(),            'left',  True, None),
-            (3, ''if pd.isna(dr[3])else str(dr[3]).strip(),            'left',  True, None),
+            (2, ten_raw,                                                'left',  True, None),
+            (3, nd_raw,                                                 'left',  True, None),
             (4, ''if pd.isna(dr[4])else str(dr[4]).strip(),            'center',False,None),
-            (5, ''if pd.isna(dr[5])else str(dr[5]).strip(),            'center',False,None),
+            (5, lo_use,                                                 'center',False,None),
             (6, ''if pd.isna(dr[6])else str(dr[6]).strip(),            'left',  True, None),
-            (7, dr[7] if isinstance(dr[7],datetime.datetime)
-                else(''if pd.isna(dr[7])else dr[7]),                   'center',False,'DD/MM/YYYY'),
+            (7, han_use if isinstance(han_use,datetime.datetime)
+                else(''if han_use==''else han_use),                    'center',False,'DD/MM/YYYY'),
             (8, dr[8] if not pd.isna(dr[8])else 0,                    'right', False,'#,##0'),
             (9, dr[9] if not pd.isna(dr[9])else 0,                    'right', False,'#,##0'),
             (10,dr[10]if not pd.isna(dr[10])else 0,                   'right', False,'#,##0'),
@@ -420,6 +597,9 @@ def build_xnt(tmpl_bytes, companies):
             cl.font=Font(name='Times New Roman',size=11)
             cl.alignment=Alignment(horizontal=ha,vertical='center',wrap_text=wrap)
             if fmt and val!='': cl.number_format=fmt
+        # Hướng 2: tô màu ô Hạn dùng (cột 7)
+        ef = expiry_fill(han_use)
+        if ef: ws.cell(row=rn, column=7).fill = ef
         cm=ws.cell(row=rn,column=13,value=f'=H{rn}*L{rn}'); ap(cm,ds[13])
         cm.font=Font(name='Times New Roman',size=11)
         cm.alignment=Alignment(horizontal='right',vertical='center')
@@ -1111,7 +1291,7 @@ def parse_bbkk_raw(raw_df):
         drugs.append(fixed_row)
     return drugs, {'drugs': len(drugs), 'skipped': skipped}
 
-def build_bbkk(tmpl_bytes, drugs, thang, nam):
+def build_bbkk(tmpl_bytes, drugs, thang, nam, ma_map=None, fuzzy_map=None):
     """
     Điền dữ liệu vào form BBKK chuẩn.
     Tự động cập nhật tháng/năm trong tiêu đề và ngày kiểm kê.
@@ -1227,16 +1407,25 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam):
         nd  = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
         # Form BBKK: 1=STT 2=TênThuốc 3=NồngĐộ 4=DVT 5=ĐơnGiá 6=SốLô 7=HãngSX 8=HạnDùng 9=SLSổSách 10=SLThựcTế 11=Hỏng 12=GhiChú
         # Raw data: col0=STT col1=Tên col2=NồngĐộ col3=DVT col4=ĐơnGiá col5=SốLô col6=HãngSX col7=HạnDùng col8=SLSổSách col10=SLThựcTế
+        # Hướng 3: tra bảng lô/hạn mới nhất (BBKK không có Mã HPT nên dùng fuzzy)
+        gia_raw = float(dr[4]) if not pd.isna(dr[4]) else 0
+        lo_raw  = str(dr[5]).strip() if not pd.isna(dr[5]) else ''
+        han_raw = dr[7] if not pd.isna(dr[7]) else ''
+        if ma_map is not None:
+            lo_use, han_use, _ = apply_lot_map(
+                lo_raw, han_raw, ten, nd, gia_raw, '', ma_map, fuzzy_map or {})
+        else:
+            lo_use, han_use = lo_raw, han_raw
         cols = [
             (1,  stt,                                                'center', False, None),
             (2,  ten,                                                'left',   True,  None),
             (3,  nd,                                                 'left',   False, None),
             (4,  str(dr[3]).strip() if not pd.isna(dr[3]) else '',   'center', False, None),
-            (5,  float(dr[4]) if not pd.isna(dr[4]) else 0,         'right',  False, '#,##0'),
-            (6,  str(dr[5]).strip() if not pd.isna(dr[5]) else '',   'center', False, None),
+            (5,  gia_raw,                                            'right',  False, '#,##0'),
+            (6,  lo_use,                                             'center', False, None),
             (7,  str(dr[6]).strip() if not pd.isna(dr[6]) else '',   'left',   True,  None),
-            (8,  dr[7] if isinstance(dr[7], datetime.datetime)
-                 else ('' if pd.isna(dr[7]) else dr[7]),             'center', False, 'DD/MM/YYYY'),
+            (8,  han_use if isinstance(han_use, datetime.datetime)
+                 else ('' if han_use == '' else han_use),            'center', False, 'DD/MM/YYYY'),
             (9,  float(dr[8]) if not pd.isna(dr[8]) else 0,         'right',  False, '#,##0'),
         ]
         col10 = dr[10] if 10 in dr.index and not pd.isna(dr[10]) else (dr[8] if not pd.isna(dr[8]) else 0)
@@ -1249,6 +1438,9 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam):
             cl.font = Font(name='Times New Roman', size=11)
             cl.alignment = Alignment(horizontal=ha, vertical='center', wrap_text=wrap)
             if fmt and val != '': cl.number_format = fmt
+        # Hướng 2: tô màu ô Hạn dùng (cột 8)
+        ef = expiry_fill(han_use)
+        if ef: ws.cell(row=rn, column=8).fill = ef
         # Cột 11 (Hỏng) và 12 (Ghi chú) để trống
         for c in (11, 12):
             if c in ds:
@@ -1457,6 +1649,14 @@ with tab_bienban:
         col1, col2 = st.columns(2)
         with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
         with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xls","xlsx"], key="bbkn_tpl")
+
+        st.markdown("""<div class="info-box">
+        📦 <b>Cập nhật Số lô + Hạn dùng tự động (tuỳ chọn):</b> Upload 2 file bên dưới để app tự tra và điền
+        lô/hạn mới nhất từ dữ liệu nhập tháng. Nếu không upload, app giữ nguyên lô/hạn từ file HPT.
+        </div>""", unsafe_allow_html=True)
+        col3, col4 = st.columns(2)
+        with col3: bbkn_f_dulieutho = st.file_uploader("📥 Dữ liệu thô nhập tháng (có Số lô, Hạn dùng)", type=["xls","xlsx"], key="bbkn_dulieutho")
+        with col4: bbkn_f_nhaptháng = st.file_uploader("📋 Báo cáo nhập trong tháng (có Mã HPT)", type=["xls","xlsx"], key="bbkn_nhapthang")
         st.markdown("<hr>", unsafe_allow_html=True)
 
         ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
@@ -1486,13 +1686,27 @@ with tab_bienban:
                     if not companies:
                         st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
                         st.stop()
-                    result, debug_rows_bbkn = build_bbkn(tpl_b, companies)
-                    st.session_state['bbkn_result']      = result
-                    st.session_state['bbkn_stats']       = stats
-                    st.session_state['bbkn_done']        = True
-                    st.session_state['bbkn_thang_val']   = bbkn_thang
-                    st.session_state['bbkn_nam_val']     = bbkn_nam
-                    st.session_state['bbkn_debug_rows']  = debug_rows_bbkn
+                    # Hướng 3: build bảng lô/hạn nếu có upload file nhập tháng
+                    ma_map_bbkn = fuzzy_map_bbkn = None
+                    lot_map_info_bbkn = ''
+                    if bbkn_f_dulieutho and bbkn_f_nhaptháng:
+                        bbkn_f_dulieutho.seek(0); bbkn_f_nhaptháng.seek(0)
+                        df_dlt = pd.read_excel(io.BytesIO(bbkn_f_dulieutho.read()), sheet_name=0, header=None)
+                        df_ntt = pd.read_excel(io.BytesIO(bbkn_f_nhaptháng.read()), sheet_name=0, header=None)
+                        ma_map_bbkn, fuzzy_map_bbkn = build_lot_map(df_dlt, df_ntt)
+                        lot_map_info_bbkn = f"✅ Bảng lô/hạn: {len(ma_map_bbkn)} mã HPT, {len(fuzzy_map_bbkn)} khớp fuzzy"
+                    # Hướng 1: cảnh báo trước khi xuất
+                    exp_bbkn, near_bbkn = check_expiry_warnings(companies, mode='companies')
+                    result, debug_rows_bbkn = build_bbkn(tpl_b, companies, ma_map_bbkn, fuzzy_map_bbkn)
+                    st.session_state['bbkn_result']        = result
+                    st.session_state['bbkn_stats']         = stats
+                    st.session_state['bbkn_done']          = True
+                    st.session_state['bbkn_thang_val']     = bbkn_thang
+                    st.session_state['bbkn_nam_val']       = bbkn_nam
+                    st.session_state['bbkn_debug_rows']    = debug_rows_bbkn
+                    st.session_state['bbkn_exp']           = exp_bbkn
+                    st.session_state['bbkn_near']          = near_bbkn
+                    st.session_state['bbkn_lot_map_info']  = lot_map_info_bbkn
                 except Exception as e:
                     st.error(f"❌ Lỗi: {e}"); st.exception(e)
 
@@ -1502,6 +1716,15 @@ with tab_bienban:
             _t = st.session_state.get("bbkn_thang_val", bbkn_thang)
             _n = st.session_state.get("bbkn_nam_val",   bbkn_nam)
             fname  = f"BBKN_T{_t}_{_n}_HoanChinh.xlsx"
+            # Hướng 1: hiển thị cảnh báo hạn dùng
+            show_expiry_warnings(
+                st.session_state.get('bbkn_exp', []),
+                st.session_state.get('bbkn_near', []),
+                label=f'BBKN T{_t}/{_n}')
+            lmi = st.session_state.get('bbkn_lot_map_info', '')
+            if lmi:
+                st.markdown(f'<div class="map-box">🔄 <b>Cập nhật lô/hạn:</b> {lmi}</div>',
+                            unsafe_allow_html=True)
             st.markdown(f"""
             <div class="ok-box">
               <div class="icon">✅</div>
@@ -1548,6 +1771,14 @@ with tab_bienban:
         col1k, col2k = st.columns(2)
         with col1k: raw_file_bbkk = st.file_uploader("📂 File dữ liệu thô HPT (BBKK)", type=["xls","xlsx"], key="bbkk_raw")
         with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xls","xlsx"], key="bbkk_tpl")
+
+        st.markdown("""<div class="info-box">
+        📦 <b>Cập nhật Số lô + Hạn dùng tự động (tuỳ chọn):</b> Upload 2 file bên dưới để app tự tra và điền
+        lô/hạn mới nhất. Nếu không upload, app giữ nguyên lô/hạn từ file HPT.
+        </div>""", unsafe_allow_html=True)
+        col3k, col4k = st.columns(2)
+        with col3k: bbkk_f_dulieutho = st.file_uploader("📥 Dữ liệu thô nhập tháng (có Số lô, Hạn dùng)", type=["xls","xlsx"], key="bbkk_dulieutho")
+        with col4k: bbkk_f_nhapthang = st.file_uploader("📋 Báo cáo nhập trong tháng (có Mã HPT)", type=["xls","xlsx"], key="bbkk_nhapthang")
         st.markdown("<hr>", unsafe_allow_html=True)
 
         ready_bbkk = raw_file_bbkk is not None and tpl_file_bbkk is not None
@@ -1561,7 +1792,6 @@ with tab_bienban:
                     else:
                         raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
                     tpl_b_kk = tpl_file_bbkk.read()
-                    # Nếu form chuẩn là .xls thì convert sang xlsx bytes
                     if tpl_file_bbkk.name.endswith('.xls'):
                         import xlrd, openpyxl as _oxl2
                         _xwb2 = xlrd.open_workbook(file_contents=tpl_b_kk)
@@ -1575,12 +1805,26 @@ with tab_bienban:
                     if not drugs_kk:
                         st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
                         st.stop()
-                    result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam)
-                    st.session_state['bbkk_result'] = result_kk
-                    st.session_state['bbkk_stats']  = stats_kk
-                    st.session_state['bbkk_done']   = True
-                    st.session_state['bbkk_thang_val'] = bbkk_thang
-                    st.session_state['bbkk_nam_val']   = bbkk_nam
+                    # Hướng 3: build bảng lô/hạn nếu có upload
+                    ma_map_kk = fuzzy_map_kk = None
+                    lot_map_info_kk = ''
+                    if bbkk_f_dulieutho and bbkk_f_nhapthang:
+                        bbkk_f_dulieutho.seek(0); bbkk_f_nhapthang.seek(0)
+                        df_dlt_kk = pd.read_excel(io.BytesIO(bbkk_f_dulieutho.read()), sheet_name=0, header=None)
+                        df_ntt_kk = pd.read_excel(io.BytesIO(bbkk_f_nhapthang.read()), sheet_name=0, header=None)
+                        ma_map_kk, fuzzy_map_kk = build_lot_map(df_dlt_kk, df_ntt_kk)
+                        lot_map_info_kk = f"✅ Bảng lô/hạn: {len(ma_map_kk)} mã HPT, {len(fuzzy_map_kk)} khớp fuzzy"
+                    # Hướng 1: cảnh báo trước khi xuất
+                    exp_kk, near_kk = check_expiry_warnings(drugs_kk, mode='drugs')
+                    result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam, ma_map_kk, fuzzy_map_kk)
+                    st.session_state['bbkk_result']        = result_kk
+                    st.session_state['bbkk_stats']         = stats_kk
+                    st.session_state['bbkk_done']          = True
+                    st.session_state['bbkk_thang_val']     = bbkk_thang
+                    st.session_state['bbkk_nam_val']       = bbkk_nam
+                    st.session_state['bbkk_exp']           = exp_kk
+                    st.session_state['bbkk_near']          = near_kk
+                    st.session_state['bbkk_lot_map_info']  = lot_map_info_kk
                 except Exception as e:
                     st.error(f"❌ Lỗi: {e}"); st.exception(e)
 
@@ -1590,6 +1834,15 @@ with tab_bienban:
             _tk = st.session_state.get("bbkk_thang_val", bbkk_thang)
             _nk = st.session_state.get("bbkk_nam_val",   bbkk_nam)
             fname_kk = f"BBKK_T{_tk}_{_nk}_HoanChinh.xlsx"
+            # Hướng 1: cảnh báo hạn dùng
+            show_expiry_warnings(
+                st.session_state.get('bbkk_exp', []),
+                st.session_state.get('bbkk_near', []),
+                label=f'BBKK T{_tk}/{_nk}')
+            lmi_kk = st.session_state.get('bbkk_lot_map_info', '')
+            if lmi_kk:
+                st.markdown(f'<div class="map-box">🔄 <b>Cập nhật lô/hạn:</b> {lmi_kk}</div>',
+                            unsafe_allow_html=True)
             st.markdown(f"""
             <div class="ok-box">
               <div class="icon">✅</div>
@@ -1626,6 +1879,14 @@ with tab_xnt_main:
     col1x, col2x = st.columns(2)
     with col1x: raw_file_xnt = st.file_uploader("📂 File dữ liệu thô HPT (XNT)", type=["xls","xlsx"], key="xnt_raw")
     with col2x: tpl_file_xnt = st.file_uploader("📄 File form chuẩn XNT", type=["xls","xlsx"], key="xnt_tpl")
+
+    st.markdown("""<div class="info-box">
+    📦 <b>Cập nhật Số lô + Hạn dùng tự động (tuỳ chọn):</b> Upload 2 file bên dưới để app tự tra và điền
+    lô/hạn mới nhất. Nếu không upload, app giữ nguyên lô/hạn từ file HPT.
+    </div>""", unsafe_allow_html=True)
+    col3x, col4x = st.columns(2)
+    with col3x: xnt_f_dulieutho = st.file_uploader("📥 Dữ liệu thô nhập tháng (có Số lô, Hạn dùng)", type=["xls","xlsx"], key="xnt_dulieutho")
+    with col4x: xnt_f_nhapthang = st.file_uploader("📋 Báo cáo nhập trong tháng (có Mã HPT)", type=["xls","xlsx"], key="xnt_nhapthang")
     st.markdown("<hr>", unsafe_allow_html=True)
 
     ready_xnt_main = raw_file_xnt is not None and tpl_file_xnt is not None
@@ -1639,7 +1900,6 @@ with tab_xnt_main:
                 else:
                     raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None)
                 tpl_b2  = tpl_file_xnt.read()
-                # Nếu form chuẩn là .xls thì convert sang bytes bình thường (openpyxl sẽ lỗi với .xls)
                 if tpl_file_xnt.name.endswith('.xls'):
                     import xlrd, openpyxl
                     xls_wb = xlrd.open_workbook(file_contents=tpl_b2)
@@ -1650,17 +1910,30 @@ with tab_xnt_main:
                         for c in range(xls_ws.ncols):
                             new_ws.cell(row=r+1, column=c+1, value=xls_ws.cell_value(r,c))
                     tmp_buf = io.BytesIO(); new_wb.save(tmp_buf); tpl_b2 = tmp_buf.getvalue()
-                # Cập nhật tháng/năm trong form
                 tpl_b2 = update_xnt_dates(tpl_b2, xnt_thang, xnt_nam)
                 companies2, stats2 = parse_companies(raw_df2, 12)
                 if not companies2:
                     st.error("❌ Không tìm thấy dữ liệu hợp lệ."); st.stop()
-                result2 = build_xnt(tpl_b2, companies2)
-                st.session_state['xnt_main_result']    = result2
-                st.session_state['xnt_main_stats']     = stats2
-                st.session_state['xnt_main_done']      = True
-                st.session_state['xnt_main_thang_val'] = xnt_thang
-                st.session_state['xnt_main_nam_val']   = xnt_nam
+                # Hướng 3: build bảng lô/hạn nếu có upload
+                ma_map_xnt = fuzzy_map_xnt = None
+                lot_map_info_xnt = ''
+                if xnt_f_dulieutho and xnt_f_nhapthang:
+                    xnt_f_dulieutho.seek(0); xnt_f_nhapthang.seek(0)
+                    df_dlt_xnt = pd.read_excel(io.BytesIO(xnt_f_dulieutho.read()), sheet_name=0, header=None)
+                    df_ntt_xnt = pd.read_excel(io.BytesIO(xnt_f_nhapthang.read()), sheet_name=0, header=None)
+                    ma_map_xnt, fuzzy_map_xnt = build_lot_map(df_dlt_xnt, df_ntt_xnt)
+                    lot_map_info_xnt = f"✅ Bảng lô/hạn: {len(ma_map_xnt)} mã HPT, {len(fuzzy_map_xnt)} khớp fuzzy"
+                # Hướng 1: cảnh báo trước khi xuất
+                exp_xnt, near_xnt = check_expiry_warnings(companies2, mode='companies')
+                result2 = build_xnt(tpl_b2, companies2, ma_map_xnt, fuzzy_map_xnt)
+                st.session_state['xnt_main_result']       = result2
+                st.session_state['xnt_main_stats']        = stats2
+                st.session_state['xnt_main_done']         = True
+                st.session_state['xnt_main_thang_val']    = xnt_thang
+                st.session_state['xnt_main_nam_val']      = xnt_nam
+                st.session_state['xnt_main_exp']          = exp_xnt
+                st.session_state['xnt_main_near']         = near_xnt
+                st.session_state['xnt_main_lot_map_info'] = lot_map_info_xnt
             except Exception as e:
                 st.error(f"❌ Lỗi: {e}"); st.exception(e)
 
@@ -1670,6 +1943,15 @@ with tab_xnt_main:
         _tx = st.session_state.get("xnt_main_thang_val", xnt_thang)
         _nx = st.session_state.get("xnt_main_nam_val",   xnt_nam)
         fname2  = f"XNT_T{_tx}_{_nx}_HoanChinh.xlsx"
+        # Hướng 1: cảnh báo hạn dùng
+        show_expiry_warnings(
+            st.session_state.get('xnt_main_exp', []),
+            st.session_state.get('xnt_main_near', []),
+            label=f'XNT T{_tx}/{_nx}')
+        lmi_xnt = st.session_state.get('xnt_main_lot_map_info', '')
+        if lmi_xnt:
+            st.markdown(f'<div class="map-box">🔄 <b>Cập nhật lô/hạn:</b> {lmi_xnt}</div>',
+                        unsafe_allow_html=True)
         st.markdown(f"""
         <div class="ok-box">
           <div class="icon">✅</div>
