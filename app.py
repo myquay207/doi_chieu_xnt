@@ -383,7 +383,7 @@ def build_bbkn(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
         ws.row_dimensions[rn].height = 20
 
     def wdr(rn, stt, dr):
-        # Hướng 3: tra bảng lô/hạn mới nhất từ file nhập tháng
+        # Hướng 3: cập nhật Số lô (col5) và Hạn dùng (col7) từ bảng nhập tháng
         ten_raw = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
         nd_raw  = str(dr[3]).strip() if not pd.isna(dr[3]) else ''
         gia_raw = float(dr[8]) if not pd.isna(dr[8]) else 0
@@ -413,9 +413,9 @@ def build_bbkn(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
             cl.font = Font(name='Times New Roman',size=12)
             cl.alignment = Alignment(horizontal=ha,vertical='center',wrap_text=wrap)
             if fmt and val!='': cl.number_format = fmt
-        # Hướng 2: tô màu ô Hạn dùng (cột 8)
+        # Hướng 2: lưu fill cảnh báo vào cache (áp dụng sau post-processing)
         ef = expiry_fill(han_use)
-        if ef: ws.cell(row=rn, column=8).fill = ef
+        if ef: expiry_fills_bbkn[rn] = ef
         ck = ws.cell(row=rn,column=11,value=f'=I{rn}*J{rn}'); ap(ck,ds[11])
         ck.font=Font(name='Times New Roman',size=12)
         ck.alignment=Alignment(horizontal='right',vertical='center')
@@ -424,6 +424,7 @@ def build_bbkn(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
 
     cr = DS; drn = []
     debug_rows = []  # Thu thập dòng bất thường để hiển thị
+    expiry_fills_bbkn = {}  # Hướng 2: cache {row → fill} — áp dụng SAU post-processing
     for name,drugs in companies:
         wco(cr,name); cr+=1
         for i,dr in enumerate(drugs,1):
@@ -496,6 +497,9 @@ def build_bbkn(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
                 if col==8 and isinstance(cl.value,datetime.datetime): cl.number_format='DD/MM/YYYY'
 
     for col,w in BBKN_W.items(): ws.column_dimensions[get_column_letter(col)].width=w
+    # Hướng 2: áp dụng fill cảnh báo hạn dùng (cột 8) SAU tất cả post-processing
+    for _rn, _fill in expiry_fills_bbkn.items():
+        ws.cell(row=_rn, column=8).fill = _fill
     ws.page_setup.orientation='landscape'; ws.page_setup.paperSize=ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0
     ws.sheet_properties.pageSetUpPr.fitToPage=True
@@ -597,9 +601,9 @@ def build_xnt(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
             cl.font=Font(name='Times New Roman',size=11)
             cl.alignment=Alignment(horizontal=ha,vertical='center',wrap_text=wrap)
             if fmt and val!='': cl.number_format=fmt
-        # Hướng 2: tô màu ô Hạn dùng (cột 7)
+        # Hướng 2: lưu fill cảnh báo vào cache
         ef = expiry_fill(han_use)
-        if ef: ws.cell(row=rn, column=7).fill = ef
+        if ef: expiry_fills_xnt[rn] = ef
         cm=ws.cell(row=rn,column=13,value=f'=H{rn}*L{rn}'); ap(cm,ds[13])
         cm.font=Font(name='Times New Roman',size=11)
         cm.alignment=Alignment(horizontal='right',vertical='center')
@@ -607,6 +611,7 @@ def build_xnt(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
         cn=ws.cell(row=rn,column=14,value=''); ap(cn,ds[14])
 
     cr=DS; drn=[]
+    expiry_fills_xnt = {}  # Hướng 2: cache {row → fill}
     for name,drugs in companies:
         wco(cr,name); cr+=1
         for i,dr in enumerate(drugs,1): wdr(cr,i,dr); drn.append(cr); cr+=1
@@ -669,6 +674,9 @@ def build_xnt(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
                 if col==7 and isinstance(cl.value,datetime.datetime): cl.number_format='DD/MM/YYYY'
 
     for col,w in XNT_W.items(): ws.column_dimensions[get_column_letter(col)].width=w
+    # Hướng 2: áp dụng fill cảnh báo hạn dùng (cột 7) SAU tất cả post-processing
+    for _rn, _fill in expiry_fills_xnt.items():
+        ws.cell(row=_rn, column=7).fill = _fill
     ws.page_setup.orientation='landscape'; ws.page_setup.paperSize=ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0
     ws.sheet_properties.pageSetUpPr.fitToPage=True
@@ -1438,9 +1446,9 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam, ma_map=None, fuzzy_map=None):
             cl.font = Font(name='Times New Roman', size=11)
             cl.alignment = Alignment(horizontal=ha, vertical='center', wrap_text=wrap)
             if fmt and val != '': cl.number_format = fmt
-        # Hướng 2: tô màu ô Hạn dùng (cột 8)
+        # Hướng 2: lưu fill cảnh báo vào cache
         ef = expiry_fill(han_use)
-        if ef: ws.cell(row=rn, column=8).fill = ef
+        if ef: expiry_fills_bbkk[rn] = ef
         # Cột 11 (Hỏng) và 12 (Ghi chú) để trống
         for c in (11, 12):
             if c in ds:
@@ -1448,6 +1456,7 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam, ma_map=None, fuzzy_map=None):
                 ap(cc, ds[c])
 
     stt = 1
+    expiry_fills_bbkk = {}  # Hướng 2: cache {row → fill}
     for dr in drugs:
         wdr_kk(DS + stt - 1, stt, dr)
         stt += 1
@@ -1482,6 +1491,9 @@ def build_bbkk(tmpl_bytes, drugs, thang, nam, ma_map=None, fuzzy_map=None):
                 cl.number_format = '#,##0'
             if col == 8 and isinstance(cl.value, datetime.datetime):
                 cl.number_format = 'DD/MM/YYYY'
+    # Hướng 2: áp dụng fill cảnh báo hạn dùng (cột 8) SAU tất cả post-processing
+    for _rn, _fill in expiry_fills_bbkk.items():
+        ws.cell(row=_rn, column=8).fill = _fill
 
     # ── Cập nhật footer: ngày ký biên bản (dòng cuối) ────────────────────────
     # Tìm dòng có "Ngày" hoặc "ngày" trong phần cuối
@@ -1650,13 +1662,18 @@ with tab_bienban:
         with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
         with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xls","xlsx"], key="bbkn_tpl")
 
-        st.markdown("""<div class="info-box">
-        📦 <b>Cập nhật Số lô + Hạn dùng tự động (tuỳ chọn):</b> Upload 2 file bên dưới để app tự tra và điền
-        lô/hạn mới nhất từ dữ liệu nhập tháng. Nếu không upload, app giữ nguyên lô/hạn từ file HPT.
-        </div>""", unsafe_allow_html=True)
-        col3, col4 = st.columns(2)
-        with col3: bbkn_f_dulieutho = st.file_uploader("📥 Dữ liệu thô nhập tháng (có Số lô, Hạn dùng)", type=["xls","xlsx"], key="bbkn_dulieutho")
-        with col4: bbkn_f_nhaptháng = st.file_uploader("📋 Báo cáo nhập trong tháng (có Mã HPT)", type=["xls","xlsx"], key="bbkn_nhapthang")
+        # Hiển thị trạng thái bảng lô/hạn dùng chung từ tab Đối chiếu
+        _shared_ma = st.session_state.get('shared_ma_map')
+        if _shared_ma is not None:
+            st.markdown(
+                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ tab Đối chiếu): '
+                f'{len(_shared_ma)} mã HPT — sẽ tự cập nhật Số lô + Hạn dùng khi xuất.</div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="info-box">💡 Upload <b>Dữ liệu thô nhập tháng</b> trong tab <b>Đối Chiếu Dược</b> '
+                'để kích hoạt tự động cập nhật Số lô + Hạn dùng.</div>',
+                unsafe_allow_html=True)
         st.markdown("<hr>", unsafe_allow_html=True)
 
         ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
@@ -1686,15 +1703,12 @@ with tab_bienban:
                     if not companies:
                         st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
                         st.stop()
-                    # Hướng 3: build bảng lô/hạn nếu có upload file nhập tháng
-                    ma_map_bbkn = fuzzy_map_bbkn = None
-                    lot_map_info_bbkn = ''
-                    if bbkn_f_dulieutho and bbkn_f_nhaptháng:
-                        bbkn_f_dulieutho.seek(0); bbkn_f_nhaptháng.seek(0)
-                        df_dlt = pd.read_excel(io.BytesIO(bbkn_f_dulieutho.read()), sheet_name=0, header=None)
-                        df_ntt = pd.read_excel(io.BytesIO(bbkn_f_nhaptháng.read()), sheet_name=0, header=None)
-                        ma_map_bbkn, fuzzy_map_bbkn = build_lot_map(df_dlt, df_ntt)
-                        lot_map_info_bbkn = f"✅ Bảng lô/hạn: {len(ma_map_bbkn)} mã HPT, {len(fuzzy_map_bbkn)} khớp fuzzy"
+                    # Hướng 3: dùng bảng lô/hạn chung từ tab Đối chiếu
+                    ma_map_bbkn    = st.session_state.get('shared_ma_map')
+                    fuzzy_map_bbkn = st.session_state.get('shared_fuzzy_map')
+                    lot_map_info_bbkn = (
+                        f"✅ {len(ma_map_bbkn)} mã HPT · {len(fuzzy_map_bbkn)} fuzzy"
+                        if ma_map_bbkn else '')
                     # Hướng 1: cảnh báo trước khi xuất
                     exp_bbkn, near_bbkn = check_expiry_warnings(companies, mode='companies')
                     result, debug_rows_bbkn = build_bbkn(tpl_b, companies, ma_map_bbkn, fuzzy_map_bbkn)
@@ -1772,13 +1786,17 @@ with tab_bienban:
         with col1k: raw_file_bbkk = st.file_uploader("📂 File dữ liệu thô HPT (BBKK)", type=["xls","xlsx"], key="bbkk_raw")
         with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xls","xlsx"], key="bbkk_tpl")
 
-        st.markdown("""<div class="info-box">
-        📦 <b>Cập nhật Số lô + Hạn dùng tự động (tuỳ chọn):</b> Upload 2 file bên dưới để app tự tra và điền
-        lô/hạn mới nhất. Nếu không upload, app giữ nguyên lô/hạn từ file HPT.
-        </div>""", unsafe_allow_html=True)
-        col3k, col4k = st.columns(2)
-        with col3k: bbkk_f_dulieutho = st.file_uploader("📥 Dữ liệu thô nhập tháng (có Số lô, Hạn dùng)", type=["xls","xlsx"], key="bbkk_dulieutho")
-        with col4k: bbkk_f_nhapthang = st.file_uploader("📋 Báo cáo nhập trong tháng (có Mã HPT)", type=["xls","xlsx"], key="bbkk_nhapthang")
+        _shared_ma_kk = st.session_state.get('shared_ma_map')
+        if _shared_ma_kk is not None:
+            st.markdown(
+                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ tab Đối chiếu): '
+                f'{len(_shared_ma_kk)} mã HPT — sẽ tự cập nhật Số lô + Hạn dùng khi xuất.</div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="info-box">💡 Upload <b>Dữ liệu thô nhập tháng</b> trong tab <b>Đối Chiếu Dược</b> '
+                'để kích hoạt tự động cập nhật Số lô + Hạn dùng.</div>',
+                unsafe_allow_html=True)
         st.markdown("<hr>", unsafe_allow_html=True)
 
         ready_bbkk = raw_file_bbkk is not None and tpl_file_bbkk is not None
@@ -1805,15 +1823,12 @@ with tab_bienban:
                     if not drugs_kk:
                         st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
                         st.stop()
-                    # Hướng 3: build bảng lô/hạn nếu có upload
-                    ma_map_kk = fuzzy_map_kk = None
-                    lot_map_info_kk = ''
-                    if bbkk_f_dulieutho and bbkk_f_nhapthang:
-                        bbkk_f_dulieutho.seek(0); bbkk_f_nhapthang.seek(0)
-                        df_dlt_kk = pd.read_excel(io.BytesIO(bbkk_f_dulieutho.read()), sheet_name=0, header=None)
-                        df_ntt_kk = pd.read_excel(io.BytesIO(bbkk_f_nhapthang.read()), sheet_name=0, header=None)
-                        ma_map_kk, fuzzy_map_kk = build_lot_map(df_dlt_kk, df_ntt_kk)
-                        lot_map_info_kk = f"✅ Bảng lô/hạn: {len(ma_map_kk)} mã HPT, {len(fuzzy_map_kk)} khớp fuzzy"
+                    # Hướng 3: dùng bảng lô/hạn chung từ tab Đối chiếu
+                    ma_map_kk    = st.session_state.get('shared_ma_map')
+                    fuzzy_map_kk = st.session_state.get('shared_fuzzy_map')
+                    lot_map_info_kk = (
+                        f"✅ {len(ma_map_kk)} mã HPT · {len(fuzzy_map_kk)} fuzzy"
+                        if ma_map_kk else '')
                     # Hướng 1: cảnh báo trước khi xuất
                     exp_kk, near_kk = check_expiry_warnings(drugs_kk, mode='drugs')
                     result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam, ma_map_kk, fuzzy_map_kk)
@@ -1880,13 +1895,17 @@ with tab_xnt_main:
     with col1x: raw_file_xnt = st.file_uploader("📂 File dữ liệu thô HPT (XNT)", type=["xls","xlsx"], key="xnt_raw")
     with col2x: tpl_file_xnt = st.file_uploader("📄 File form chuẩn XNT", type=["xls","xlsx"], key="xnt_tpl")
 
-    st.markdown("""<div class="info-box">
-    📦 <b>Cập nhật Số lô + Hạn dùng tự động (tuỳ chọn):</b> Upload 2 file bên dưới để app tự tra và điền
-    lô/hạn mới nhất. Nếu không upload, app giữ nguyên lô/hạn từ file HPT.
-    </div>""", unsafe_allow_html=True)
-    col3x, col4x = st.columns(2)
-    with col3x: xnt_f_dulieutho = st.file_uploader("📥 Dữ liệu thô nhập tháng (có Số lô, Hạn dùng)", type=["xls","xlsx"], key="xnt_dulieutho")
-    with col4x: xnt_f_nhapthang = st.file_uploader("📋 Báo cáo nhập trong tháng (có Mã HPT)", type=["xls","xlsx"], key="xnt_nhapthang")
+    _shared_ma_xnt = st.session_state.get('shared_ma_map')
+    if _shared_ma_xnt is not None:
+        st.markdown(
+            f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ tab Đối chiếu): '
+            f'{len(_shared_ma_xnt)} mã HPT — sẽ tự cập nhật Số lô + Hạn dùng khi xuất.</div>',
+            unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<div class="info-box">💡 Upload <b>Dữ liệu thô nhập tháng</b> trong tab <b>Đối Chiếu Dược</b> '
+            'để kích hoạt tự động cập nhật Số lô + Hạn dùng.</div>',
+            unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
 
     ready_xnt_main = raw_file_xnt is not None and tpl_file_xnt is not None
@@ -1914,15 +1933,12 @@ with tab_xnt_main:
                 companies2, stats2 = parse_companies(raw_df2, 12)
                 if not companies2:
                     st.error("❌ Không tìm thấy dữ liệu hợp lệ."); st.stop()
-                # Hướng 3: build bảng lô/hạn nếu có upload
-                ma_map_xnt = fuzzy_map_xnt = None
-                lot_map_info_xnt = ''
-                if xnt_f_dulieutho and xnt_f_nhapthang:
-                    xnt_f_dulieutho.seek(0); xnt_f_nhapthang.seek(0)
-                    df_dlt_xnt = pd.read_excel(io.BytesIO(xnt_f_dulieutho.read()), sheet_name=0, header=None)
-                    df_ntt_xnt = pd.read_excel(io.BytesIO(xnt_f_nhapthang.read()), sheet_name=0, header=None)
-                    ma_map_xnt, fuzzy_map_xnt = build_lot_map(df_dlt_xnt, df_ntt_xnt)
-                    lot_map_info_xnt = f"✅ Bảng lô/hạn: {len(ma_map_xnt)} mã HPT, {len(fuzzy_map_xnt)} khớp fuzzy"
+                # Hướng 3: dùng bảng lô/hạn chung từ tab Đối chiếu
+                ma_map_xnt    = st.session_state.get('shared_ma_map')
+                fuzzy_map_xnt = st.session_state.get('shared_fuzzy_map')
+                lot_map_info_xnt = (
+                    f"✅ {len(ma_map_xnt)} mã HPT · {len(fuzzy_map_xnt)} fuzzy"
+                    if ma_map_xnt else '')
                 # Hướng 1: cảnh báo trước khi xuất
                 exp_xnt, near_xnt = check_expiry_warnings(companies2, mode='companies')
                 result2 = build_xnt(tpl_b2, companies2, ma_map_xnt, fuzzy_map_xnt)
@@ -2012,6 +2028,42 @@ with tab_dc:
     with dcu6:
         dc_f_bbkk = st.file_uploader("📄 Biên bản Kiểm kê – BBKK",
             type=["xlsx","xls"], key="dc_bbkk")
+
+    dcu7, dcu8 = st.columns(2)
+    with dcu7:
+        dc_f_dulieutho = st.file_uploader(
+            "📦 Dữ liệu thô nhập tháng (có Số lô + Hạn dùng) – dùng chung cho BBKN · BBKK · XNT",
+            type=["xlsx","xls"], key="dc_dulieutho",
+            help="Upload để app tự cập nhật Số lô và Hạn dùng mới nhất vào các file xuất ra. "
+                 "Kết hợp với 'Báo cáo Nhập hàng trong tháng' bên trên.")
+    with dcu8:
+        st.markdown("""<div style="padding:8px 0; color: var(--text-muted, #888); font-size:13px;">
+        ℹ️ Khi upload đủ <b>Dữ liệu thô nhập</b> (cột trái) và <b>Báo cáo nhập trong tháng</b> (ô trên),
+        app sẽ tự động cập nhật Số lô + Hạn dùng cho BBKN, BBKK và XNT.
+        Thuốc nào không có trong tháng nhập sẽ giữ nguyên lô/hạn từ HPT.
+        </div>""", unsafe_allow_html=True)
+
+    # Build shared lot_map ngay khi có đủ 2 file — lưu vào session_state dùng chung
+    _nhap_files = dc_f_nhap if dc_f_nhap else []
+    _nhap_file1 = _nhap_files[0] if _nhap_files else None
+    if dc_f_dulieutho and _nhap_file1:
+        try:
+            dc_f_dulieutho.seek(0); _nhap_file1.seek(0)
+            _df_dlt = pd.read_excel(io.BytesIO(dc_f_dulieutho.read()), sheet_name=0, header=None)
+            _df_ntt = pd.read_excel(io.BytesIO(_nhap_file1.read()),    sheet_name=0, header=None)
+            _nhap_file1.seek(0); dc_f_dulieutho.seek(0)
+            _ma_map, _fuzzy_map = build_lot_map(_df_dlt, _df_ntt)
+            st.session_state['shared_ma_map']    = _ma_map
+            st.session_state['shared_fuzzy_map'] = _fuzzy_map
+            st.markdown(
+                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng:</b> '
+                f'{len(_ma_map)} mã HPT khớp chính xác · {len(_fuzzy_map)} khớp fuzzy (Tên+Nồng độ+Giá) '
+                f'— sẽ tự động áp dụng khi xuất BBKN · BBKK · XNT</div>',
+                unsafe_allow_html=True)
+        except Exception as _e:
+            st.warning(f"⚠️ Không build được bảng lô/hạn: {_e}")
+    elif dc_f_dulieutho and not _nhap_file1:
+        st.info("💡 Upload thêm **Báo cáo Nhập hàng trong tháng** (ô trên) để kích hoạt cập nhật lô/hạn tự động.")
 
     # Hiển thị trạng thái bảng mã
     gmap_dc = st.session_state.get('dc_global_map')
