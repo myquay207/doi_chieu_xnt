@@ -2024,46 +2024,37 @@ with tab_dc:
     dcu5, dcu6 = st.columns(2)
     with dcu5:
         dc_f_bbkn = st.file_uploader("📄 Biên bản Kiểm nhập – BBKN",
-            type=["xlsx","xls"], key="dc_bbkn")
+            type=["xlsx","xls"], key="dc_bbkn",
+            help="File dữ liệu thô HPT kiểm nhập — chứa Số lô, Hạn dùng. "
+                 "Dùng cho đối chiếu kiểm nhập VÀ tự động cập nhật lô/hạn cho BBKN · BBKK · XNT.")
     with dcu6:
         dc_f_bbkk = st.file_uploader("📄 Biên bản Kiểm kê – BBKK",
             type=["xlsx","xls"], key="dc_bbkk")
 
-    dcu7, dcu8 = st.columns(2)
-    with dcu7:
-        dc_f_dulieutho = st.file_uploader(
-            "📦 Dữ liệu thô nhập tháng (có Số lô + Hạn dùng) – dùng chung cho BBKN · BBKK · XNT",
-            type=["xlsx","xls"], key="dc_dulieutho",
-            help="Upload để app tự cập nhật Số lô và Hạn dùng mới nhất vào các file xuất ra. "
-                 "Kết hợp với 'Báo cáo Nhập hàng trong tháng' bên trên.")
-    with dcu8:
-        st.markdown("""<div style="padding:8px 0; color: var(--text-muted, #888); font-size:13px;">
-        ℹ️ Khi upload đủ <b>Dữ liệu thô nhập</b> (cột trái) và <b>Báo cáo nhập trong tháng</b> (ô trên),
-        app sẽ tự động cập nhật Số lô + Hạn dùng cho BBKN, BBKK và XNT.
-        Thuốc nào không có trong tháng nhập sẽ giữ nguyên lô/hạn từ HPT.
-        </div>""", unsafe_allow_html=True)
-
-    # Build shared lot_map ngay khi có đủ 2 file — lưu vào session_state dùng chung
+    # Build shared lot_map: dùng dc_f_bbkn (có Số lô + Hạn dùng) + dc_f_nhap (có Mã HPT)
+    # Không cần ô upload riêng — BBKN chính là dữ liệu thô nhập tháng
     _nhap_files = dc_f_nhap if dc_f_nhap else []
     _nhap_file1 = _nhap_files[0] if _nhap_files else None
-    if dc_f_dulieutho and _nhap_file1:
+    if dc_f_bbkn and _nhap_file1:
         try:
-            dc_f_dulieutho.seek(0); _nhap_file1.seek(0)
-            _df_dlt = pd.read_excel(io.BytesIO(dc_f_dulieutho.read()), sheet_name=0, header=None)
-            _df_ntt = pd.read_excel(io.BytesIO(_nhap_file1.read()),    sheet_name=0, header=None)
-            _nhap_file1.seek(0); dc_f_dulieutho.seek(0)
+            dc_f_bbkn.seek(0); _nhap_file1.seek(0)
+            _df_dlt = pd.read_excel(io.BytesIO(dc_f_bbkn.read()),   sheet_name=0, header=None)
+            _df_ntt = pd.read_excel(io.BytesIO(_nhap_file1.read()), sheet_name=0, header=None)
+            _nhap_file1.seek(0); dc_f_bbkn.seek(0)
             _ma_map, _fuzzy_map = build_lot_map(_df_dlt, _df_ntt)
             st.session_state['shared_ma_map']    = _ma_map
             st.session_state['shared_fuzzy_map'] = _fuzzy_map
             st.markdown(
-                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng:</b> '
-                f'{len(_ma_map)} mã HPT khớp chính xác · {len(_fuzzy_map)} khớp fuzzy (Tên+Nồng độ+Giá) '
-                f'— sẽ tự động áp dụng khi xuất BBKN · BBKK · XNT</div>',
+                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ BBKN + Nhập trong tháng): '
+                f'{len(_ma_map)} mã HPT khớp chính xác · {len(_fuzzy_map)} khớp fuzzy '
+                f'— tự động áp dụng khi xuất BBKN · BBKK · XNT</div>',
                 unsafe_allow_html=True)
         except Exception as _e:
             st.warning(f"⚠️ Không build được bảng lô/hạn: {_e}")
-    elif dc_f_dulieutho and not _nhap_file1:
+    elif dc_f_bbkn and not _nhap_file1:
         st.info("💡 Upload thêm **Báo cáo Nhập hàng trong tháng** (ô trên) để kích hoạt cập nhật lô/hạn tự động.")
+    elif _nhap_file1 and not dc_f_bbkn:
+        st.info("💡 Upload **Biên bản Kiểm nhập – BBKN** (ô trên) để kích hoạt cập nhật lô/hạn tự động.")
 
     # Hiển thị trạng thái bảng mã
     gmap_dc = st.session_state.get('dc_global_map')
