@@ -1,2271 +1,2248 @@
 """
-HỆ THỐNG TỰ ĐỘNG HÓA BIÊN BẢN DƯỢC – Bệnh viện Đà Nẵng
-Hỗ trợ: BBKN · BBKK · XNT · Đối Chiếu Dược (XNT, Kiểm nhập, Kiểm kê)
-v10 – Tích hợp 3 hướng cảnh báo & cập nhật Số lô / Hạn dùng:
-  Hướng 1: Cảnh báo hết hạn / cận hạn ngay trên Streamlit UI (bảng màu đỏ/vàng)
-  Hướng 2: Tô màu ô Hạn dùng trong file Excel xuất (đỏ=hết hạn, vàng=cận hạn)
-  Hướng 3: Cập nhật Số lô + Hạn dùng mới nhất từ file dữ liệu thô nhập tháng
-            (join qua Số HĐ → Mã HPT, fallback Tên+Nồng độ+Đơn giá; ưu tiên lô hạn xa nhất)
+Quản Lý Thu Chi Căn Hộ — v4.1 (UI Refresh)
+Database: Google Sheets (dữ liệu vĩnh viễn, không mất khi deploy lại)
+TT152/2025/TT-BTC
+
+Nâng cấp v4.1:
+- UI/UX nâng cấp toàn diện: dashboard cards màu sắc, form compact, toast notifications
+- Giữ nguyên 100% logic: @st.fragment, Google Sheets sync, tính toán dòng tiền
 """
 
-import io, math, copy, datetime, re, warnings
 import streamlit as st
 import pandas as pd
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-from openpyxl.utils import get_column_letter
-
-warnings.filterwarnings("ignore")
+import gspread
+from google.oauth2.service_account import Credentials
+import json
+import io
+import calendar
+from datetime import date, timedelta
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ══════════════════════════════════════════════════════════════════════════════
-st.set_page_config(
-    page_title="Biên Bản Dược – BV Đà Nẵng",
-    page_icon="🏥",
-    layout="centered",
-)
+# CONSTANTS
+# ══════════════════════════════════════════════════════════════════════════════
+ROOMS = ['P101', 'P201', 'P202', 'P301', 'P302', 'P401', 'P402', 'P501', 'P502']
+
+DANH_MUC_THU = [
+    "Doanh thu tiền phòng",
+    "Thu hộ tiền điện",
+    "Thu hộ tiền nước",
+]
+
+DANH_MUC_CHI = [
+    "Chi phí vận hành chung",
+    "Chi lương / thưởng",
+    "Chi quản lý chung",
+    "Chi hộ tiền điện",
+    "Chi hộ tiền nước",
+    "Chi khác",
+]
+
+KY_OPTIONS = [
+    "Tháng này", "Quý 1", "Quý 2", "Quý 3", "Quý 4",
+    "6 Tháng đầu năm", "6 Tháng cuối năm", "Cả năm", "Tùy chỉnh khoảng ngày",
+]
+
+GS_SHEET_NAME = "giao_dich"
+GS_COLUMNS = ["id", "ngay", "loai", "ma_phong", "danh_muc", "so_tien", "ghi_chu", "thang_nhap", "trang_thai"]
+TRANG_THAI_DA_THU = {"Đã thu", "Đã thanh toán"}
+
+# ── Tiền cọc tab ─────────────────────────────────────────────────────────────
+GS_COC_SHEET   = "tiem_coc"
+GS_COC_COLUMNS = ["ma_phong", "ten_kh", "ngay_coc", "so_tien_coc", "ghi_chu"]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GOOGLE SHEETS CONNECTION
+# ══════════════════════════════════════════════════════════════════════════════
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+@st.cache_resource(ttl=300)
+def get_gsheet_client():
+    if "gcp_service_account" not in st.secrets:
+        st.error(
+            "❌ Thiếu `[gcp_service_account]` trong secrets.toml\n\n"
+            "**Cách sửa:** Mở file `.streamlit/secrets.toml` và đảm bảo có đúng format bên dưới."
+        )
+        return None
+    if "spreadsheet_url" not in st.secrets:
+        st.error("❌ Thiếu `spreadsheet_url` trong secrets.toml")
+        return None
+    try:
+        raw = st.secrets["gcp_service_account"]
+        creds_dict = {
+            "type":                        raw.get("type", "service_account"),
+            "project_id":                  raw["project_id"],
+            "private_key_id":              raw["private_key_id"],
+            "private_key":                 raw["private_key"].replace("\\n", "\n"),
+            "client_email":                raw["client_email"],
+            "client_id":                   raw["client_id"],
+            "auth_uri":                    raw.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+            "token_uri":                   raw.get("token_uri", "https://oauth2.googleapis.com/token"),
+            "auth_provider_x509_cert_url": raw.get("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs"),
+            "client_x509_cert_url":        raw.get("client_x509_cert_url", ""),
+        }
+        creds  = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        return client
+    except KeyError as e:
+        st.error(f"❌ Thiếu trường `{e}` trong `[gcp_service_account]` của secrets.toml")
+        return None
+    except Exception as e:
+        st.error(f"❌ Lỗi kết nối Google Sheets: {e}")
+        return None
+
+@st.cache_resource(ttl=300)
+def get_worksheet():
+    client = get_gsheet_client()
+    if client is None:
+        return None
+    try:
+        spreadsheet_url = st.secrets["spreadsheet_url"]
+        sh = client.open_by_url(spreadsheet_url)
+        try:
+            ws = sh.worksheet(GS_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=GS_SHEET_NAME, rows=5000, cols=len(GS_COLUMNS))
+            ws.append_row(GS_COLUMNS)
+        return ws
+    except gspread.exceptions.APIError as e:
+        st.error(f"❌ Google Sheets API lỗi: {e}.")
+        return None
+    except Exception as e:
+        st.error(f"❌ Không mở được Google Sheets: {e}")
+        return None
+
+@st.cache_resource(ttl=300)
+def get_worksheet_coc():
+    """Worksheet riêng cho tab tiem_coc — hoàn toàn tách biệt khỏi giao_dich."""
+    client = get_gsheet_client()
+    if client is None:
+        return None
+    try:
+        spreadsheet_url = st.secrets["spreadsheet_url"]
+        sh = client.open_by_url(spreadsheet_url)
+        try:
+            ws = sh.worksheet(GS_COC_SHEET)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=GS_COC_SHEET, rows=20, cols=len(GS_COC_COLUMNS))
+            ws.append_row(GS_COC_COLUMNS)
+            # Khởi tạo 9 dòng trống cho 9 phòng
+            for room in ROOMS:
+                ws.append_row([room, "", "", 0, ""])
+        return ws
+    except gspread.exceptions.APIError as e:
+        st.error(f"❌ Google Sheets API lỗi (cọc): {e}.")
+        return None
+    except Exception as e:
+        st.error(f"❌ Không mở được sheet tiền cọc: {e}")
+        return None
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DANH_SACH_PHONG — SHEET MỚI (Bước 1: Kết nối & Đọc dữ liệu phòng)
+# ══════════════════════════════════════════════════════════════════════════════
+GS_DSP_SHEET   = "DANH_SACH_PHONG"
+GS_DSP_COLUMNS = [
+    "Mã Phòng", "Tên Khách Thuê", "Giá Thuê Gốc",
+    "Đơn Giá Điện", "Đơn Giá Nước", "Ngôn Ngữ Bill",
+]
+
+# Dữ liệu mặc định khởi tạo cho 9 phòng khi tạo sheet lần đầu
+_DSP_DEFAULT_LANG = "Tiếng Việt"
+_DSP_SEED_ROWS = [
+    [room, "", 0, 0, 0, _DSP_DEFAULT_LANG] for room in ROOMS
+]
+
+@st.cache_resource(ttl=300)
+def get_worksheet_dsp():
+    """
+    Trả về worksheet 'DANH_SACH_PHONG'.
+    Nếu sheet chưa tồn tại → tự tạo mới và seed 9 dòng cho 9 phòng.
+    Hoàn toàn độc lập, KHÔNG ảnh hưởng đến giao_dich / tiem_coc.
+    """
+    client = get_gsheet_client()
+    if client is None:
+        return None
+    try:
+        spreadsheet_url = st.secrets["spreadsheet_url"]
+        sh = client.open_by_url(spreadsheet_url)
+        try:
+            ws = sh.worksheet(GS_DSP_SHEET)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(
+                title=GS_DSP_SHEET,
+                rows=len(ROOMS) + 10,
+                cols=len(GS_DSP_COLUMNS),
+            )
+            # Header row
+            ws.append_row(GS_DSP_COLUMNS)
+            # Seed 9 dòng — 1 dòng mỗi phòng, giá trị mặc định = 0
+            ws.append_rows(_DSP_SEED_ROWS, value_input_option="USER_ENTERED")
+        return ws
+    except gspread.exceptions.APIError as e:
+        st.error(f"❌ Google Sheets API lỗi (danh sách phòng): {e}.")
+        return None
+    except Exception as e:
+        st.error(f"❌ Không mở được sheet danh sách phòng: {e}")
+        return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_danh_sach_phong() -> pd.DataFrame:
+    """
+    Đọc toàn bộ sheet DANH_SACH_PHONG thành DataFrame.
+    Cache 60 giây — gọi load_danh_sach_phong.clear() sau mỗi lần ghi để làm mới.
+    """
+    ws = get_worksheet_dsp()
+    if ws is None:
+        return pd.DataFrame(columns=GS_DSP_COLUMNS)
+    try:
+        data = ws.get_all_records(expected_headers=GS_DSP_COLUMNS)
+        if not data:
+            return pd.DataFrame(columns=GS_DSP_COLUMNS)
+        df = pd.DataFrame(data)
+        df["Giá Thuê Gốc"]  = pd.to_numeric(df["Giá Thuê Gốc"],  errors="coerce").fillna(0).astype(int)
+        df["Đơn Giá Điện"]  = pd.to_numeric(df["Đơn Giá Điện"],  errors="coerce").fillna(0).astype(int)
+        df["Đơn Giá Nước"]  = pd.to_numeric(df["Đơn Giá Nước"],  errors="coerce").fillna(0).astype(int)
+        df["Ngôn Ngữ Bill"] = df["Ngôn Ngữ Bill"].fillna(_DSP_DEFAULT_LANG).astype(str)
+        # Đảm bảo đủ 9 phòng (phòng chưa có dòng → thêm dòng mặc định)
+        existing = set(df["Mã Phòng"].tolist())
+        missing  = [r for r in ROOMS if r not in existing]
+        if missing:
+            empty = pd.DataFrame([{
+                "Mã Phòng": r, "Tên Khách Thuê": "", "Giá Thuê Gốc": 0,
+                "Đơn Giá Điện": 0, "Đơn Giá Nước": 0,
+                "Ngôn Ngữ Bill": _DSP_DEFAULT_LANG,
+            } for r in missing])
+            df = pd.concat([df, empty], ignore_index=True)
+        # Sort theo thứ tự ROOMS
+        room_order = {r: i for i, r in enumerate(ROOMS)}
+        df["_order"] = df["Mã Phòng"].map(room_order)
+        df = df.sort_values("_order").drop(columns=["_order"]).reset_index(drop=True)
+        return df
+    except Exception as e:
+        st.error(f"Lỗi đọc danh sách phòng: {e}")
+        return pd.DataFrame(columns=GS_DSP_COLUMNS)
+
+
+def get_thong_tin_phong(ma_phong: str) -> dict:
+    """
+    Trả về dict chứa toàn bộ thông tin gốc của phòng từ sheet DANH_SACH_PHONG.
+
+    Ví dụ kết quả:
+    {
+        "Mã Phòng":       "P101",
+        "Tên Khách Thuê": "Nguyễn Văn A",
+        "Giá Thuê Gốc":   5000000,
+        "Đơn Giá Điện":   3500,
+        "Đơn Giá Nước":   15000,
+        "Ngôn Ngữ Bill":  "Tiếng Việt",
+    }
+
+    Nếu phòng không tìm thấy → trả về dict với giá trị mặc định (không raise lỗi).
+    """
+    df = load_danh_sach_phong()
+    row = df[df["Mã Phòng"] == ma_phong]
+    if row.empty:
+        return {
+            "Mã Phòng":       ma_phong,
+            "Tên Khách Thuê": "",
+            "Giá Thuê Gốc":   0,
+            "Đơn Giá Điện":   0,
+            "Đơn Giá Nước":   0,
+            "Ngôn Ngữ Bill":  _DSP_DEFAULT_LANG,
+        }
+    return row.iloc[0].to_dict()
+
+
+def upsert_thong_tin_phong(
+    ma_phong: str,
+    ten_kh: str,
+    gia_thue_goc: int,
+    don_gia_dien: int,
+    don_gia_nuoc: int,
+    ngon_ngu_bill: str = "Tiếng Việt",
+) -> bool:
+    """
+    Ghi đè (hoặc thêm mới) 1 dòng trong DANH_SACH_PHONG cho phòng ma_phong.
+    Trả về True nếu thành công, False nếu lỗi.
+    """
+    ws = get_worksheet_dsp()
+    if ws is None:
+        return False
+    try:
+        all_rooms = ws.col_values(1)  # ['Mã Phòng', 'P101', 'P201', ...]
+        target_row = None
+        for idx, val in enumerate(all_rooms):
+            if val == ma_phong:
+                target_row = idx + 1  # 1-based
+                break
+
+        row_data = [ma_phong, ten_kh, gia_thue_goc, don_gia_dien, don_gia_nuoc, ngon_ngu_bill]
+
+        if target_row:
+            col_end   = gspread.utils.rowcol_to_a1(target_row, len(GS_DSP_COLUMNS))
+            col_start = gspread.utils.rowcol_to_a1(target_row, 1)
+            ws.update(f"{col_start}:{col_end}", [row_data], value_input_option="USER_ENTERED")
+        else:
+            ws.append_row(row_data, value_input_option="USER_ENTERED")
+
+        load_danh_sach_phong.clear()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi lưu thông tin phòng: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATABASE OPERATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=60, show_spinner=False)
+def load_all() -> pd.DataFrame:
+    ws = get_worksheet()
+    if ws is None:
+        return pd.DataFrame(columns=GS_COLUMNS)
+    try:
+        data = ws.get_all_records(expected_headers=GS_COLUMNS)
+        if not data:
+            return pd.DataFrame(columns=GS_COLUMNS)
+        df = pd.DataFrame(data)
+        df["ngay"]    = pd.to_datetime(df["ngay"], errors="coerce")
+        df["so_tien"] = pd.to_numeric(df["so_tien"], errors="coerce").fillna(0)
+        df = df.dropna(subset=["ngay"])
+        return df.sort_values("ngay", ascending=False).reset_index(drop=True)
+    except Exception as e:
+        st.error(f"Lỗi đọc dữ liệu: {e}")
+        return pd.DataFrame(columns=GS_COLUMNS)
+
+def parse_tien(s: str) -> int:
+    s = str(s).strip()
+    if not s:
+        return 0
+    s = s.replace(" ", "").replace("₫", "").replace("đ", "").replace("VND", "")
+    if "." in s and "," in s:
+        last_dot   = s.rfind(".")
+        last_comma = s.rfind(",")
+        if last_dot > last_comma:
+            s = s.replace(",", "")
+        else:
+            s = s.replace(".", "").replace(",", ".")
+    elif "." in s:
+        parts = s.split(".")
+        if all(len(p) == 3 for p in parts[1:]):
+            s = s.replace(".", "")
+    elif "," in s:
+        parts = s.split(",")
+        if all(len(p) == 3 for p in parts[1:]):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
+    try:
+        return max(0, int(float(s)))
+    except (ValueError, TypeError):
+        return 0
+
+def _next_id(ws) -> int:
+    try:
+        data = ws.col_values(1)
+        ids = [int(x) for x in data[1:] if str(x).isdigit()]
+        return max(ids) + 1 if ids else 1
+    except Exception:
+        return 1
+
+def insert_gd(ngay, loai, ma_phong, danh_muc, so_tien, ghi_chu, trang_thai="Đã thu"):
+    ws = get_worksheet()
+    if ws is None:
+        return False
+    try:
+        new_id = _next_id(ws)
+        thang_nhap = f"{ngay.month:02d}/{ngay.year}"
+        row = [
+            new_id, str(ngay), loai, ma_phong, danh_muc,
+            float(so_tien), ghi_chu or "", thang_nhap, trang_thai,
+        ]
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        load_all.clear()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi lưu dữ liệu: {e}")
+        return False
+
+def append_batch(rows: list[list]) -> bool:
+    ws = get_worksheet()
+    if ws is None:
+        return False
+    try:
+        next_id = _next_id(ws)
+        full_rows = [[next_id + i] + r for i, r in enumerate(rows)]
+        ws.append_rows(full_rows, value_input_option="USER_ENTERED")
+        load_all.clear()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi ghi batch: {e}")
+        return False
+
+def delete_gd(gd_id: int):
+    ws = get_worksheet()
+    if ws is None:
+        return
+    try:
+        cell = ws.find(str(gd_id), in_column=1)
+        if cell:
+            ws.delete_rows(cell.row)
+            load_all.clear()
+    except Exception as e:
+        st.error(f"Lỗi xóa: {e}")
+
+def update_gd(gd_id: int, ngay_moi, loai_moi: str, ma_phong_moi: str,
+              danh_muc_moi: str, so_tien_moi: float, ghi_chu_moi: str) -> bool:
+    ws = get_worksheet()
+    if ws is None:
+        return False
+    try:
+        cell = ws.find(str(gd_id), in_column=1)
+        if not cell:
+            st.error(f"Không tìm thấy giao dịch id={gd_id}")
+            return False
+        row_idx = cell.row
+        thang_nhap = f"{ngay_moi.month:02d}/{ngay_moi.year}"
+        updates = [
+            {"range": gspread.utils.rowcol_to_a1(row_idx, 2), "values": [[str(ngay_moi)]]},
+            {"range": gspread.utils.rowcol_to_a1(row_idx, 3), "values": [[loai_moi]]},
+            {"range": gspread.utils.rowcol_to_a1(row_idx, 4), "values": [[ma_phong_moi]]},
+            {"range": gspread.utils.rowcol_to_a1(row_idx, 5), "values": [[danh_muc_moi]]},
+            {"range": gspread.utils.rowcol_to_a1(row_idx, 6), "values": [[float(so_tien_moi)]]},
+            {"range": gspread.utils.rowcol_to_a1(row_idx, 7), "values": [[ghi_chu_moi or ""]]},
+            {"range": gspread.utils.rowcol_to_a1(row_idx, 8), "values": [[thang_nhap]]},
+        ]
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
+        load_all.clear()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi sửa giao dịch: {e}")
+        return False
+
+def delete_batch(gd_ids: list[int]):
+    ws = get_worksheet()
+    if ws is None:
+        return False
+    try:
+        all_ids = ws.col_values(1)
+        rows_to_delete = []
+        for row_idx, cell_val in enumerate(all_ids):
+            try:
+                if int(cell_val) in gd_ids:
+                    rows_to_delete.append(row_idx + 1)
+            except (ValueError, TypeError):
+                pass
+        for row_idx in sorted(rows_to_delete, reverse=True):
+            ws.delete_rows(row_idx)
+        load_all.clear()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi xóa batch: {e}")
+        return False
+
+def update_trang_thai(gd_ids: list[int], trang_thai_moi: str) -> bool:
+    ws = get_worksheet()
+    if ws is None:
+        return False
+    try:
+        all_ids = ws.col_values(1)
+        col_tt  = GS_COLUMNS.index("trang_thai") + 1
+
+        updates = []
+        for row_idx, cell_val in enumerate(all_ids):
+            try:
+                if int(cell_val) in gd_ids:
+                    updates.append({
+                        "range": gspread.utils.rowcol_to_a1(row_idx + 1, col_tt),
+                        "values": [[trang_thai_moi]],
+                    })
+            except (ValueError, TypeError):
+                pass
+
+        if updates:
+            ws.batch_update(updates, value_input_option="USER_ENTERED")
+            load_all.clear()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi cập nhật trạng thái: {e}")
+        return False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TIỀN CỌC — DATABASE OPERATIONS (hoàn toàn tách biệt khỏi thu chi)
+# ══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=60, show_spinner=False)
+def load_coc() -> pd.DataFrame:
+    """Đọc toàn bộ dữ liệu tiền cọc từ sheet 'tiem_coc'."""
+    ws = get_worksheet_coc()
+    if ws is None:
+        return pd.DataFrame(columns=GS_COC_COLUMNS)
+    try:
+        data = ws.get_all_records(expected_headers=GS_COC_COLUMNS)
+        if not data:
+            return pd.DataFrame(columns=GS_COC_COLUMNS)
+        df = pd.DataFrame(data)
+        df["so_tien_coc"] = pd.to_numeric(df["so_tien_coc"], errors="coerce").fillna(0)
+        df["ngay_coc"]    = pd.to_datetime(df["ngay_coc"], errors="coerce")
+        # Đảm bảo đủ 9 phòng
+        existing_rooms = set(df["ma_phong"].tolist())
+        missing = [r for r in ROOMS if r not in existing_rooms]
+        if missing:
+            empty_rows = pd.DataFrame([{
+                "ma_phong": r, "ten_kh": "", "ngay_coc": pd.NaT,
+                "so_tien_coc": 0, "ghi_chu": ""
+            } for r in missing])
+            df = pd.concat([df, empty_rows], ignore_index=True)
+        # Sort theo thứ tự ROOMS
+        room_order = {r: i for i, r in enumerate(ROOMS)}
+        df["_order"] = df["ma_phong"].map(room_order)
+        df = df.sort_values("_order").drop(columns=["_order"]).reset_index(drop=True)
+        return df
+    except Exception as e:
+        st.error(f"Lỗi đọc dữ liệu tiền cọc: {e}")
+        return pd.DataFrame(columns=GS_COC_COLUMNS)
+
+def upsert_coc(ma_phong: str, ten_kh: str, ngay_coc, so_tien_coc: int, ghi_chu: str) -> bool:
+    """Cập nhật (ghi đè) dòng cọc của phòng — dùng find() để locate row."""
+    ws = get_worksheet_coc()
+    if ws is None:
+        return False
+    try:
+        # Tìm dòng theo ma_phong ở cột 1
+        all_rooms = ws.col_values(1)  # ['ma_phong', 'P101', 'P201', ...]
+        target_row = None
+        for idx, val in enumerate(all_rooms):
+            if val == ma_phong:
+                target_row = idx + 1  # 1-based
+                break
+
+        ngay_str = str(ngay_coc) if ngay_coc else ""
+        row_data  = [ma_phong, ten_kh, ngay_str, float(so_tien_coc), ghi_chu or ""]
+
+        if target_row:
+            # Ghi đè dòng hiện có (cột A→E)
+            col_end = gspread.utils.rowcol_to_a1(target_row, len(GS_COC_COLUMNS))
+            col_start = gspread.utils.rowcol_to_a1(target_row, 1)
+            ws.update(f"{col_start}:{col_end}", [row_data], value_input_option="USER_ENTERED")
+        else:
+            # Phòng chưa có dòng → append mới
+            ws.append_row(row_data, value_input_option="USER_ENTERED")
+
+        load_coc.clear()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi lưu tiền cọc: {e}")
+        return False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXCEL IMPORT
+# ══════════════════════════════════════════════════════════════════════════════
+def parse_excel_invoice(uploaded_file, thang: int, nam: int) -> pd.DataFrame | None:
+    try:
+        raw = pd.read_excel(
+            uploaded_file,
+            sheet_name="3. QL hóa đơn",
+            header=[1, 2],
+            engine="openpyxl",
+        )
+    except Exception as e:
+        st.error(f"❌ Không đọc được sheet '3. QL hóa đơn': {e}")
+        return None
+
+    def flatten_col(col_tuple):
+        parts = [str(c).strip() for c in col_tuple if "Unnamed" not in str(c)]
+        return "_".join(parts) if parts else ""
+
+    flat_cols = [flatten_col(c) for c in raw.columns]
+    raw.columns = flat_cols
+
+    def find_col(keywords):
+        for col in raw.columns:
+            col_lower = col.lower()
+            if all(k.lower() in col_lower for k in keywords):
+                return col
+        return None
+
+    col_phong     = find_col(["phòng"])   or find_col(["phong"])
+    col_dai_dien  = find_col(["đại diện"]) or find_col(["dai dien"])
+    col_tong      = find_col(["tổng phải thu"]) or find_col(["tong phai thu"]) or find_col(["tổng"]) or find_col(["tong"])
+    col_tien_nha  = (find_col(["tiền thuê phòng", "thành tiền"])
+                     or find_col(["thuê phòng", "thành tiền"])
+                     or find_col(["tiền thuê"])
+                     or find_col(["tien thue"]))
+    col_da_dung   = (find_col(["tiền điện", "đã dùng"])
+                     or find_col(["tien dien", "da dung"])
+                     or find_col(["đã dùng"])
+                     or find_col(["da dung"]))
+    col_tien_dien = (find_col(["tiền điện", "thành tiền"])
+                     or find_col(["tien dien", "thanh tien"]))
+    if col_tien_dien and col_da_dung and col_tien_dien == col_da_dung:
+        col_tien_dien = None
+    col_tien_nuoc = (find_col(["tiền nước"])
+                     or find_col(["tien nuoc"]))
+
+    found = {
+        "Phòng":         col_phong,
+        "Đại diện":      col_dai_dien,
+        "Tiền nhà":      col_tien_nha,
+        "Đã dùng (kWh)": col_da_dung,
+        "Tiền điện":     col_tien_dien,
+        "Tiền nước":     col_tien_nuoc,
+        "Tổng phải thu": col_tong,
+    }
+    missing = [k for k, v in found.items() if v is None]
+    if missing:
+        st.warning(
+            f"⚠️ Không tìm thấy cột: **{', '.join(missing)}**.\n\n"
+            f"**Cột đọc được:** {list(raw.columns)}"
+        )
+
+    result_cols = {}
+    if col_phong:     result_cols["ma_phong"]     = raw[col_phong].astype(str).str.strip()
+    if col_dai_dien:  result_cols["ten_kh"]        = raw[col_dai_dien].astype(str).str.strip()
+    if col_tien_nha:  result_cols["tien_phong"]    = pd.to_numeric(raw[col_tien_nha],  errors="coerce").fillna(0)
+    if col_da_dung:   result_cols["so_dien_kwh"]   = pd.to_numeric(raw[col_da_dung],   errors="coerce").fillna(0)
+    if col_tien_dien: result_cols["tien_dien"]     = pd.to_numeric(raw[col_tien_dien], errors="coerce").fillna(0)
+    if col_tien_nuoc: result_cols["tien_nuoc"]     = pd.to_numeric(raw[col_tien_nuoc], errors="coerce").fillna(0)
+    if col_tong:      result_cols["tong_phai_thu"] = pd.to_numeric(raw[col_tong],      errors="coerce").fillna(0)
+
+    if not result_cols:
+        st.error("❌ Không bóc tách được cột nào từ file Excel.")
+        return None
+
+    df_out = pd.DataFrame(result_cols)
+
+    if "ma_phong" in df_out.columns:
+        def _normalize_phong(x):
+            try:
+                s = str(x).strip()
+                if s in ("nan", "None", ""):
+                    return s
+                if s.upper().startswith("P") and s[1:].isdigit():
+                    return s.upper()
+                num = str(int(float(s)))
+                if num.isdigit():
+                    return f"P{num}"
+            except Exception:
+                pass
+            return s
+        df_out["ma_phong"] = df_out["ma_phong"].apply(_normalize_phong)
+        df_out = df_out[df_out["ma_phong"].isin(ROOMS)].copy()
+
+    if df_out.empty:
+        st.warning("⚠️ Không tìm thấy dữ liệu cho 9 phòng. Kiểm tra lại cột Phòng.")
+        return None
+
+    df_out["thang_nhap"] = f"{thang:02d}/{nam}"
+    df_out["trang_thai"] = "Chờ thanh toán"
+    return df_out.reset_index(drop=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+def fmt_vnd(val):
+    try:
+        return f"{int(val):,}".replace(",", ".") + " ₫"
+    except Exception:
+        return "0 ₫"
+
+def get_date_range(ky: str, year: int, cs=None, ce=None):
+    today = date.today()
+    y = year
+    if ky == "Tháng này":
+        m = today.month
+        s = date(y, m, 1)
+        e = date(y, m, calendar.monthrange(y, m)[1])
+    elif ky == "Quý 1":             s, e = date(y,1,1),  date(y,3,31)
+    elif ky == "Quý 2":             s, e = date(y,4,1),  date(y,6,30)
+    elif ky == "Quý 3":             s, e = date(y,7,1),  date(y,9,30)
+    elif ky == "Quý 4":             s, e = date(y,10,1), date(y,12,31)
+    elif ky == "6 Tháng đầu năm":  s, e = date(y,1,1),  date(y,6,30)
+    elif ky == "6 Tháng cuối năm": s, e = date(y,7,1),  date(y,12,31)
+    elif ky == "Cả năm":            s, e = date(y,1,1),  date(y,12,31)
+    else:
+        s = cs or date(y,1,1)
+        e = ce or today
+    return s, e
+
+def compute_balances(df_all, s, e):
+    if df_all.empty:
+        return 0, 0, 0, 0
+    df_real = df_all[df_all["trang_thai"].isin(TRANG_THAI_DA_THU)]
+    if df_real.empty:
+        return 0, 0, 0, 0
+    prev = df_real[df_real["ngay"].dt.date < s]
+    dau  = (prev[prev["loai"]=="Thu"]["so_tien"].sum()
+          - prev[prev["loai"]=="Chi"]["so_tien"].sum())
+    ky   = df_real[(df_real["ngay"].dt.date >= s) & (df_real["ngay"].dt.date <= e)]
+    t    = ky[ky["loai"]=="Thu"]["so_tien"].sum()
+    c    = ky[ky["loai"]=="Chi"]["so_tien"].sum()
+    return dau, t, c, dau + t - c
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXCEL EXPORT
+# ══════════════════════════════════════════════════════════════════════════════
+def _bd():
+    _s = Side(style="thin")
+    return Border(left=_s, right=_s, top=_s, bottom=_s)
+
+def _c(ws, row_n, c, v, bold=False, sz=10, col="000000", ha="center",
+       fill=None, nf=None, wrap=False, italic=False):
+    cell = ws.cell(row=row_n, column=c, value=v)
+    cell.font      = Font(name="Arial", bold=bold, size=sz, color=col, italic=italic)
+    cell.alignment = Alignment(horizontal=ha, vertical="center", wrap_text=wrap)
+    cell.border    = _bd()
+    if fill: cell.fill = PatternFill("solid", start_color=fill)
+    if nf:   cell.number_format = nf
+    return cell
+
+def _mrow(ws, row_n, c1, c2, v, bold=False, sz=10, col="000000", ha="center", fill=None, italic=False):
+    ws.merge_cells(start_row=row_n, start_column=c1, end_row=row_n, end_column=c2)
+    cell = ws.cell(row=row_n, column=c1, value=v)
+    cell.font      = Font(name="Arial", bold=bold, size=sz, color=col, italic=italic)
+    cell.alignment = Alignment(horizontal=ha, vertical="center", wrap_text=True)
+    if fill: cell.fill = PatternFill("solid", start_color=fill)
+    return cell
+
+def xuat_dong_tien(df_all, s, e) -> bytes:
+    rows = []
+    for _, row in df_all.iterrows():
+        if (row["ngay"].date() >= s and row["ngay"].date() <= e):
+            rows.append({
+                "ngay": row["ngay"],
+                "loai": str(row.get("loai", "")),
+                "danh_muc": str(row.get("danh_muc", "")),
+                "ma_phong": str(row.get("ma_phong", "")),
+                "ghi_chu": str(row.get("ghi_chu", "") or ""),
+                "so_tien": int(row["so_tien"]) if isinstance(row["so_tien"], (int, float)) else 0,
+            })
+    rows.sort(key=lambda x: x["ngay"])
+
+    tong_thu = int(sum(r["so_tien"] for r in rows if r["loai"] == "Thu"))
+    tong_chi = int(sum(r["so_tien"] for r in rows if r["loai"] == "Chi"))
+    so_du = tong_thu - tong_chi
+
+    wb = Workbook(); ws = wb.active; ws.title = "Dòng Tiền"
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 8
+    ws.column_dimensions["C"].width = 28
+    ws.column_dimensions["D"].width = 36
+    ws.column_dimensions["E"].width = 22
+
+    HDR_GREEN = "1a7f5a"; HDR_WHITE = "FFFFFF"
+    ws.row_dimensions[1].height = 28
+    _mrow(ws,1,1,5,"BÁO CÁO DÒNG TIỀN THỰC TẾ", bold=True, sz=14, ha="center", col=HDR_GREEN)
+    _mrow(ws,2,1,5,f"Từ ngày {s.strftime('%d/%m/%Y')} đến ngày {e.strftime('%d/%m/%Y')}", sz=10, ha="center", italic=True)
+
+    ws.row_dimensions[3].height = 18
+    _c(ws,3,1,"Tổng thu", bold=True, sz=10, ha="left", col="1a5c3a", fill="d6f0e5")
+    _c(ws,3,2,tong_thu, bold=True, sz=10, ha="right", nf="#,##0", fill="d6f0e5")
+    _c(ws,3,3,"Tổng chi", bold=True, sz=10, ha="left", col="b52b2b", fill="fde8e8")
+    _c(ws,3,4,tong_chi, bold=True, sz=10, ha="right", nf="#,##0", fill="fde8e8")
+    _c(ws,3,5,"", fill="fff3cd")
+    ws.row_dimensions[4].height = 22
+    _mrow(ws,4,1,4, f"Số dư cuối kỳ: {'+' if so_du >= 0 else ''}{so_du:,} ₫",
+          bold=True, sz=12, ha="right",
+          col="1a5c3a" if so_du >= 0 else "b52b2b",
+          fill="eaf7f1" if so_du >= 0 else "fdecea")
+
+    ws.row_dimensions[5].height = 28
+    for col, title in enumerate(["Ngày", "Loại", "Danh mục", "Diễn giải", "Số tiền (₫)"], 1):
+        _c(ws, 5, col, title, bold=True, col=HDR_WHITE, fill=HDR_GREEN, sz=10, wrap=True)
+
+    r_idx = 6
+    if not rows:
+        _mrow(ws, r_idx, 1, 5, "Không có dữ liệu trong kỳ.", italic=True)
+        r_idx += 1
+    else:
+        for row in rows:
+            ws.row_dimensions[int(r_idx)].height = 18
+            is_thu = row["loai"] == "Thu"
+            fill_bg = "f0faf5" if is_thu else "fff8f8"
+            dg = f"{row['ma_phong']}"
+            if row["ghi_chu"].strip():
+                dg += f" · {row['ghi_chu']}"
+            _c(ws, r_idx, 1, row["ngay"].strftime("%d/%m/%Y"), fill=fill_bg)
+            _c(ws, r_idx, 2, row["loai"], col="1a5c3a" if is_thu else "b52b2b",
+               bold=True, sz=9, fill=fill_bg)
+            _c(ws, r_idx, 3, row["danh_muc"], ha="left", fill=fill_bg)
+            _c(ws, r_idx, 4, dg, ha="left", fill=fill_bg)
+            amt = row["so_tien"] if is_thu else -row["so_tien"]
+            _c(ws, r_idx, 5, amt, ha="right", nf="#,##0;[Red]-#,##0",
+               col="1a5c3a" if is_thu else "b52b2b", fill=fill_bg)
+            r_idx += 1
+
+    rn_final = int(r_idx)
+    ws.row_dimensions[rn_final].height = 22
+    _mrow(ws, rn_final, 1, 4, "Số dư cuối kỳ", bold=True, sz=11, ha="right",
+          col="1a5c3a" if so_du >= 0 else "b52b2b", fill="d6f0e5")
+    _c(ws, rn_final, 5, int(so_du), bold=True, sz=11, ha="right",
+       col="1a5c3a" if so_du >= 0 else "b52b2b",
+       nf="#,##0;[Red]-#,##0", fill="d6f0e5")
+
+    ws.freeze_panes = "A6"
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+def xuat_s1a(df_all, s, e) -> bytes:
+    rows = []
+    for _, row in df_all.iterrows():
+        if (str(row.get("loai","")) == "Thu"
+                and str(row.get("danh_muc","")) == "Doanh thu tiền phòng"
+                and str(row.get("trang_thai","")) in TRANG_THAI_DA_THU
+                and row["ngay"].date() >= s
+                and row["ngay"].date() <= e):
+            rows.append({
+                "ngay": row["ngay"],
+                "danh_muc": str(row["danh_muc"]),
+                "ma_phong": str(row["ma_phong"]),
+                "ghi_chu": str(row.get("ghi_chu", "") or ""),
+                "so_tien": int(float(str(row["so_tien"]).replace(",","").replace(".","") or 0))
+                    if not isinstance(row["so_tien"], (int, float))
+                    else int(row["so_tien"]),
+            })
+    rows.sort(key=lambda x: x["ngay"])
+
+    wb = Workbook(); ws = wb.active; ws.title = "S1a-HKD"
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 50
+    ws.column_dimensions["C"].width = 22
+    _mrow(ws,1,1,3,"Mẫu số S1a-HKD", sz=9, ha="right", italic=True)
+    _mrow(ws,2,1,3,"(Kèm theo Thông tư số 152/2025/TT-BTC ngày 31 tháng 12 năm 2025)", sz=9, ha="right", italic=True)
+    ws.row_dimensions[3].height = 32
+    _mrow(ws,3,1,3,"SỔ DOANH THU BÁN HÀNG HÓA, DỊCH VỤ", bold=True, sz=14, ha="center")
+    _mrow(ws,4,1,3,f"Từ ngày {s.strftime('%d/%m/%Y')} đến ngày {e.strftime('%d/%m/%Y')}", sz=10, ha="center", italic=True)
+    HDR = "1a7f5a"
+    ws.row_dimensions[6].height = 32
+    _c(ws,6,1,"Ngày tháng\n(Cột A)", bold=True, col="FFFFFF", fill=HDR, wrap=True)
+    _c(ws,6,2,"Diễn giải\n(Cột B)",  bold=True, col="FFFFFF", fill=HDR, wrap=True)
+    _c(ws,6,3,"Số tiền (₫)\n(Cột 1)",bold=True, col="FFFFFF", fill=HDR, wrap=True)
+    tong = 0
+    r_idx = 7
+    if not rows:
+        _mrow(ws,r_idx,1,3,"Không có dữ liệu trong kỳ.", italic=True)
+        r_idx += 1
+    else:
+        for row in rows:
+            ws.row_dimensions[r_idx].height = 18
+            dg = f"{row['danh_muc']} — {row['ma_phong']}"
+            if row["ghi_chu"].strip(): dg += f" ({row['ghi_chu']})"
+            _c(ws, r_idx, 1, row["ngay"].strftime("%d/%m/%Y"))
+            _c(ws, r_idx, 2, dg, ha="left")
+            _c(ws, r_idx, 3, row["so_tien"], ha="right", nf="#,##0")
+            tong += row["so_tien"]
+            r_idx += 1
+    ws.row_dimensions[r_idx].height = 24
+    _c(ws, r_idx, 1, "", fill="d6f0e5")
+    _c(ws, r_idx, 2, "Tổng cộng", bold=True, sz=11, ha="right", fill="d6f0e5")
+    _c(ws, r_idx, 3, tong, bold=True, sz=11, col="1a5c3a", ha="right", nf="#,##0", fill="d6f0e5")
+    ws.freeze_panes = "A7"
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+def xuat_s2a(df_all, s, e) -> bytes:
+    rows = []
+    for _, row in df_all.iterrows():
+        if (str(row.get("loai","")) == "Thu"
+                and str(row.get("danh_muc","")) == "Doanh thu tiền phòng"
+                and str(row.get("trang_thai","")) in TRANG_THAI_DA_THU
+                and row["ngay"].date() >= s
+                and row["ngay"].date() <= e):
+            rows.append({
+                "ngay": row["ngay"],
+                "ma_phong": str(row["ma_phong"]),
+                "ghi_chu": str(row.get("ghi_chu", "") or ""),
+                "so_tien": int(row["so_tien"]) if isinstance(row["so_tien"], (int, float)) else 0,
+            })
+    rows.sort(key=lambda x: x["ngay"])
+
+    wb = Workbook(); ws = wb.active; ws.title = "S2a-HKD"
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 50
+    ws.column_dimensions["D"].width = 22
+    _mrow(ws,1,1,4,"Mẫu số S2a-HKD",sz=9,ha="right",italic=True)
+    _mrow(ws,2,1,4,"(Kèm theo Thông tư số 152/2025/TT-BTC ngày 31 tháng 12 năm 2025)",sz=9,ha="right",italic=True)
+    ws.row_dimensions[3].height = 32
+    _mrow(ws,3,1,4,"SỔ DOANH THU BÁN HÀNG HÓA, DỊCH VỤ",bold=True,sz=14,ha="center")
+    _mrow(ws,4,1,4,f"Từ ngày {s.strftime('%d/%m/%Y')} đến ngày {e.strftime('%d/%m/%Y')}",sz=10,ha="center",italic=True)
+    ws.row_dimensions[6].height = 22
+    _mrow(ws,6,1,4,"1. Ngành nghề: Dịch vụ lưu trú khác",bold=True,sz=11,col="1a5c3a",ha="left",fill="d6f0e5")
+    HDR = "1a7f5a"
+    ws.row_dimensions[7].height = 32
+    _c(ws,7,1,"STT",bold=True,col="FFFFFF",fill=HDR,wrap=True)
+    _c(ws,7,2,"Ngày tháng",bold=True,col="FFFFFF",fill=HDR,wrap=True)
+    _c(ws,7,3,"Diễn giải",bold=True,col="FFFFFF",fill=HDR,wrap=True)
+    _c(ws,7,4,"Số tiền (₫)",bold=True,col="FFFFFF",fill=HDR,wrap=True)
+    stt = 1; tong = 0; r_idx = 8
+    if not rows:
+        _mrow(ws,r_idx,1,4,"Không có dữ liệu doanh thu tiền phòng trong kỳ.",italic=True)
+        r_idx += 1
+    else:
+        for row in rows:
+            ws.row_dimensions[r_idx].height = 18
+            dg = f"Tiền phòng {row['ma_phong']}"
+            if row["ghi_chu"].strip(): dg += f" — {row['ghi_chu']}"
+            _c(ws,r_idx,1,stt)
+            _c(ws,r_idx,2,row["ngay"].strftime("%d/%m/%Y"))
+            _c(ws,r_idx,3,dg,ha="left")
+            _c(ws,r_idx,4,row["so_tien"],ha="right",nf="#,##0")
+            tong += row["so_tien"]; stt += 1; r_idx += 1
+    gtgt = int(round(tong * 0.05))
+    tncn = int(round(tong * 0.02))
+    def trow(tr, lbl, val, col="000000", fill="fff3cd", bold=True):
+        ws.row_dimensions[tr].height = 22
+        ws.merge_cells(start_row=tr,start_column=1,end_row=tr,end_column=3)
+        c1 = ws.cell(row=tr,column=1,value=str(lbl))
+        c1.font = Font(name="Arial",bold=bold,size=10,color=col)
+        c1.alignment = Alignment(horizontal="right",vertical="center")
+        c1.border = _bd(); c1.fill = PatternFill("solid",start_color=fill)
+        for ci in [2,3]:
+            cc = ws.cell(row=tr,column=ci); cc.border = _bd(); cc.fill = PatternFill("solid",start_color=fill)
+        vc = ws.cell(row=tr,column=4,value=int(val))
+        vc.font = Font(name="Arial",bold=bold,size=10,color=col)
+        vc.alignment = Alignment(horizontal="right",vertical="center")
+        vc.number_format = "#,##0"; vc.border = _bd(); vc.fill = PatternFill("solid",start_color=fill)
+    trow(r_idx,   "Tổng cộng (1)",              tong, col="1a5c3a", fill="d6f0e5")
+    trow(r_idx+1, "Thuế GTGT = (1) × 5%",       gtgt, col="c0392b", fill="fde8e8")
+    trow(r_idx+2, "Thuế TNCN = (1) × 2%",       tncn, col="c0392b", fill="fde8e8")
+    trow(r_idx+3, "Tổng số thuế GTGT phải nộp", gtgt, col="8b0000", fill="fcc8c8")
+    trow(r_idx+4, "Tổng số thuế TNCN phải nộp", tncn, col="8b0000", fill="fcc8c8")
+    ws.freeze_panes = "A8"
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE CONFIG + CSS (UI v4.1 — Refined SaaS)
+# ══════════════════════════════════════════════════════════════════════════════
+st.set_page_config(page_title="Quản Lý Căn Hộ", page_icon="🏢",
+                   layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;600;700&display=swap');
-html,body,[class*="css"]{font-family:'Be Vietnam Pro',sans-serif;}
-.hero{background:linear-gradient(135deg,#1a3a5c 0%,#2563a8 60%,#1e7fcb 100%);
-  border-radius:16px;padding:32px 36px 24px;margin-bottom:24px;color:white;
-  box-shadow:0 8px 32px rgba(37,99,168,.25);}
-.hero h1{font-size:1.55rem;font-weight:700;margin:0 0 6px;line-height:1.3;}
-.hero .sub{font-size:.88rem;font-weight:300;opacity:.85;margin:0;}
-.hero .badge{display:inline-block;background:rgba(255,255,255,.18);border-radius:20px;
-  padding:3px 12px;font-size:.75rem;font-weight:600;letter-spacing:1px;
-  margin-bottom:12px;text-transform:uppercase;}
-.tab-desc{background:#eff6ff;border-left:4px solid #2563a8;border-radius:0 10px 10px 0;
-  padding:12px 16px;margin:12px 0 18px;font-size:.86rem;color:#1e3a5f;line-height:1.6;}
-.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0;}
-.stat-grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0;}
-.stat-card{background:white;border:1px solid #e2e8f0;border-radius:12px;
-  padding:16px 12px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.06);}
-.stat-card .num{font-size:1.7rem;font-weight:700;color:#1a3a5c;line-height:1;}
-.stat-card .lbl{font-size:.75rem;color:#64748b;margin-top:4px;}
-.ok-box{background:#f0fdf4;border:1.5px solid #86efac;border-radius:12px;
-  padding:18px 20px;margin:16px 0;text-align:center;}
-.ok-box .icon{font-size:2rem;}.ok-box h3{color:#166534;margin:6px 0 4px;font-size:1rem;}
-.ok-box p{color:#15803d;font-size:.84rem;margin:0;}
-.note{background:#fff7ed;border-left:4px solid #f59e0b;border-radius:0 10px 10px 0;
-  padding:10px 14px;font-size:.82rem;color:#92400e;margin-top:14px;line-height:1.6;}
-.warn-box{background:#fff7ed;border-left:4px solid #f59e0b;border-radius:0 10px 10px 0;
-  padding:11px 15px;margin:10px 0;font-size:.84rem;color:#92400e;line-height:1.6;}
-.info-box{background:#eff6ff;border-left:4px solid #2563a8;border-radius:0 10px 10px 0;
-  padding:11px 15px;margin:10px 0 16px;font-size:.85rem;color:#1e3a5f;line-height:1.7;}
-.map-box{background:#f0fdf4;border:1.5px solid #86efac;border-radius:10px;
-  padding:10px 16px;margin:10px 0;font-size:.85rem;color:#166534;}
-.upload-section{background:#f8faff;border:1.5px solid #c7d9f5;border-radius:14px;
-  padding:18px 20px;margin-bottom:18px;}
-.upload-section h4{color:#1a3a5c;font-size:.82rem;font-weight:700;letter-spacing:1.2px;
-  text-transform:uppercase;margin:0 0 14px;}
-.stButton>button{background:linear-gradient(135deg,#1a3a5c,#2563a8)!important;
-  color:white!important;font-weight:600!important;font-size:.95rem!important;
-  border:none!important;border-radius:10px!important;padding:13px 0!important;
-  width:100%!important;box-shadow:0 4px 14px rgba(37,99,168,.3)!important;}
-[data-testid="stDownloadButton"]>button{background:linear-gradient(135deg,#166534,#16a34a)!important;
-  color:white!important;font-weight:700!important;font-size:1rem!important;
-  border:none!important;border-radius:10px!important;padding:15px 0!important;
-  width:100%!important;box-shadow:0 4px 14px rgba(22,163,74,.3)!important;}
-[data-testid="stFileUploader"]{border:2px dashed #2563a8!important;
-  border-radius:12px!important;background:#f0f6ff!important;}
-hr{border:none;border-top:1px solid #e2e8f0;margin:20px 0;}
-#MainMenu,footer{visibility:hidden;}
+@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Be Vietnam Pro', sans-serif;
+}
+
+/* ── App Header ─────────────────────────────────────────────────────────── */
+.app-hdr {
+    background: linear-gradient(135deg, #1a7f5a 0%, #0e5c40 60%, #0a4530 100%);
+    border-radius: 16px;
+    padding: 22px 32px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    box-shadow: 0 4px 20px rgba(26, 127, 90, 0.25);
+}
+.app-hdr-icon {
+    width: 52px; height: 52px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.6rem; flex-shrink: 0;
+    backdrop-filter: blur(4px);
+}
+.app-hdr h1 { color: white; margin: 0; font-size: 1.5rem; font-weight: 800; letter-spacing: -0.3px; }
+.app-hdr p  { color: rgba(255,255,255,.65); margin: 3px 0 0; font-size: .8rem; font-weight: 400; }
+.app-hdr-right { margin-left: auto; text-align: right; }
+.app-hdr-date  { color: rgba(255,255,255,.5); font-size: .75rem; }
+.app-hdr-version {
+    display: inline-block; background: rgba(255,255,255,.15);
+    border-radius: 20px; padding: 2px 10px;
+    font-size: .72rem; color: rgba(255,255,255,.85); font-weight: 600;
+    margin-top: 4px;
+}
+
+/* ── Connection Badge ───────────────────────────────────────────────────── */
+.gs-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: #edfaf3; border: 1px solid #a8e6c8;
+    border-radius: 20px; padding: 5px 14px;
+    font-size: .78rem; font-weight: 600; color: #1a7f5a;
+    margin-bottom: 18px;
+    box-shadow: 0 1px 4px rgba(26,127,90,.08);
+}
+
+/* ── Tabs ───────────────────────────────────────────────────────────────── */
+.stTabs [data-baseweb="tab-list"] {
+    background: #f2f5f3; border-radius: 12px; padding: 4px; gap: 2px;
+}
+.stTabs [data-baseweb="tab"] {
+    border-radius: 9px; font-weight: 600; font-size: .87rem; color: #777;
+    padding: 8px 20px; transition: all .15s;
+}
+.stTabs [aria-selected="true"] {
+    background: white !important; color: #1a7f5a !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,.1) !important;
+}
+
+/* ── Dashboard Cards (3-card layout) ───────────────────────────────────── */
+.dash-card {
+    border-radius: 16px; padding: 20px 22px; position: relative;
+    overflow: hidden; transition: transform .18s, box-shadow .18s;
+    cursor: default;
+}
+.dash-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 28px rgba(0,0,0,.12) !important;
+}
+.dash-card-thu {
+    background: linear-gradient(135deg, #f0faf5 0%, #e2f5ec 100%);
+    border: 1.5px solid #b8e6d0;
+    box-shadow: 0 2px 10px rgba(26,158,95,.1);
+}
+.dash-card-chi {
+    background: linear-gradient(135deg, #fff5f5 0%, #fee8e8 100%);
+    border: 1.5px solid #f5c6c6;
+    box-shadow: 0 2px 10px rgba(224,82,82,.1);
+}
+.dash-card-ton {
+    background: linear-gradient(135deg, #1a7f5a 0%, #0e5c40 100%);
+    border: 1.5px solid #167a56;
+    box-shadow: 0 4px 16px rgba(26,127,90,.3);
+}
+.dash-card-label {
+    font-size: .72rem; font-weight: 700; letter-spacing: .6px;
+    text-transform: uppercase; margin-bottom: 8px;
+}
+.dash-card-thu  .dash-card-label { color: #1a7f5a; }
+.dash-card-chi  .dash-card-label { color: #c0392b; }
+.dash-card-ton  .dash-card-label { color: rgba(255,255,255,.7); }
+
+.dash-card-amount {
+    font-size: 1.55rem; font-weight: 800; letter-spacing: -1px; line-height: 1.1;
+}
+.dash-card-thu  .dash-card-amount { color: #1a7f5a; }
+.dash-card-chi  .dash-card-amount { color: #c0392b; }
+.dash-card-ton  .dash-card-amount { color: white; }
+
+.dash-card-sub {
+    font-size: .72rem; margin-top: 5px; font-weight: 500;
+}
+.dash-card-thu .dash-card-sub  { color: #5aab82; }
+.dash-card-chi .dash-card-sub  { color: #e07878; }
+.dash-card-ton .dash-card-sub  { color: rgba(255,255,255,.55); }
+
+.dash-card-icon {
+    position: absolute; right: 18px; top: 18px;
+    font-size: 1.8rem; opacity: .18;
+}
+
+/* ── Pending Badge ──────────────────────────────────────────────────────── */
+.pending-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #fffbec; border: 1.5px solid #f5d167;
+    border-radius: 10px; padding: 9px 16px; margin: 8px 0 16px;
+    font-size: .84rem; color: #8a6000; font-weight: 600;
+    width: 100%; box-sizing: border-box;
+}
+.pending-badge b { color: #6a4800; }
+
+/* ── Balance Scoreboard (Tab 3) ─────────────────────────────────────────── */
+.sb  { display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap; }
+.sc  { flex: 1; min-width: 130px; border-radius: 13px; padding: 13px 16px; border-left: 4px solid; }
+.sc.dau { background: #f7f8f7; border-color: #c8ccc9; }
+.sc.thu { background: #e8f5f0; border-color: #1a9e5f; }
+.sc.chi { background: #fdf0f0; border-color: #e05252; }
+.sc.end { background: linear-gradient(135deg,#1a7f5a,#0f5c40); border-color: #1a7f5a; }
+.sc .sl { font-size: .68rem; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }
+.sc.dau .sl, .sc.thu .sl, .sc.chi .sl { color: #999; }
+.sc.end .sl { color: rgba(255,255,255,.65); }
+.sc .sv { font-size: 1.15rem; font-weight: 800; margin-top: 4px; }
+.sc.dau .sv { color: #555; }
+.sc.thu .sv { color: #1a9e5f; }
+.sc.chi .sv { color: #e05252; }
+.sc.end .sv { color: white; }
+
+/* ── Transaction Row (tx) ───────────────────────────────────────────────── */
+.tx {
+    background: white; border-radius: 11px; padding: 11px 14px; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 1px 5px rgba(0,0,0,.06); border: 1px solid #f0f0f0;
+    transition: box-shadow .15s;
+}
+.tx:hover { box-shadow: 0 3px 12px rgba(0,0,0,.1); }
+.ti { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center;
+      justify-content: center; font-size: .95rem; flex-shrink: 0; }
+.ti.thu { background: #e8f5f0; } .ti.chi { background: #fdf0f0; }
+.tn { flex: 1; min-width: 0; }
+.tc { font-size: .84rem; font-weight: 600; color: #222; }
+.tm { font-size: .73rem; color: #aaa; margin-top: 1px; }
+.ta { font-size: .95rem; font-weight: 700; white-space: nowrap; }
+.ta.thu { color: #1a9e5f; } .ta.chi { color: #e05252; }
+
+/* ── Mini Stats (side panel) ────────────────────────────────────────────── */
+.ms { border-radius: 12px; padding: 12px 16px; margin-bottom: 8px; border-left: 4px solid; }
+.ms.thu { background: #e8f5f0; border-color: #1a9e5f; }
+.ms.chi { background: #fdf0f0; border-color: #e05252; }
+.ms .lbl { font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.ms.thu .lbl { color: #1a7f5a; } .ms.chi .lbl { color: #e05252; }
+.ms .val { font-size: 1.1rem; font-weight: 800; margin-top: 2px; }
+.ms.thu .val { color: #1a9e5f; } .ms.chi .val { color: #e05252; }
+
+/* ── Section Heading ────────────────────────────────────────────────────── */
+.section-heading {
+    font-size: 1rem; font-weight: 700; color: #1a2e24;
+    margin: 2px 0 14px; padding-bottom: 8px;
+    border-bottom: 2px solid #e8f0ec;
+    display: flex; align-items: center; gap: 8px;
+}
+.section-heading span { font-size: 1.05rem; }
+
+/* ── Form compact blocks ────────────────────────────────────────────────── */
+.form-group-label {
+    font-size: .72rem; font-weight: 700; color: #888;
+    letter-spacing: .5px; text-transform: uppercase;
+    margin: 14px 0 6px;
+}
+.chi-notice {
+    background: #fff5f5; border-left: 3px solid #e05252;
+    border-radius: 10px; padding: 10px 14px; margin: 8px 0 14px;
+    font-size: .84rem; color: #c0392b; font-weight: 500;
+}
+
+/* ── Import Box ─────────────────────────────────────────────────────────── */
+.import-box {
+    background: linear-gradient(135deg, #f0f7ff, #e8f3ff);
+    border: 2px dashed #5a9fff; border-radius: 14px;
+    padding: 18px 22px; margin: 12px 0 18px;
+}
+.import-box b { color: #2563c0; }
+
+/* ── Pending Box ────────────────────────────────────────────────────────── */
+.cho-tt-box {
+    background: linear-gradient(135deg, #fffbec, #fff8e0);
+    border: 1.5px solid #f5c842; border-radius: 14px;
+    padding: 16px 20px; margin: 12px 0 18px;
+}
+.cho-tt-title { font-size: .95rem; font-weight: 700; color: #8a6000; margin-bottom: 8px; }
+
+/* ── Edit Form ──────────────────────────────────────────────────────────── */
+.edit-form {
+    background: #f6fffc; border: 2px solid #1a9e5f;
+    border-radius: 14px; padding: 18px 20px; margin: 8px 0 16px;
+}
+.edit-form-title { font-size: .92rem; font-weight: 700; color: #1a7f5a; margin-bottom: 12px; }
+
+/* ── Tax Info ───────────────────────────────────────────────────────────── */
+.tax-info {
+    background: linear-gradient(135deg, #fff8e6, #fff4d6);
+    border-left: 4px solid #f5a623; border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 16px; font-size: .87rem;
+}
+
+/* ── Tiền Cọc ───────────────────────────────────────────────────────────── */
+.coc-card {
+    background: linear-gradient(135deg, #f4f0ff 0%, #ede8ff 100%);
+    border: 1.5px solid #c9baff; border-radius: 14px;
+    padding: 16px 20px; margin-bottom: 14px;
+    box-shadow: 0 2px 10px rgba(120,80,220,.09);
+}
+.coc-header {
+    font-size: .72rem; font-weight: 700; letter-spacing: .5px;
+    text-transform: uppercase; color: #7c5cbf; margin-bottom: 6px;
+}
+.coc-room { font-size: 1.1rem; font-weight: 800; color: #3d1f8e; }
+.coc-amount { font-size: 1.3rem; font-weight: 800; color: #5b2dd9; margin-top: 2px; }
+.coc-meta { font-size: .75rem; color: #9e8ec5; margin-top: 4px; }
+.coc-warn { font-size: .82rem; color: #b45309; font-weight: 600; margin-top: 4px; }
+.coc-empty { opacity: .45; }
+.coc-total-box {
+    background: linear-gradient(135deg, #5b2dd9 0%, #3d1f8e 100%);
+    border-radius: 14px; padding: 18px 24px; margin: 6px 0 20px;
+    color: white; box-shadow: 0 4px 18px rgba(91,45,217,.28);
+}
+.coc-total-label { font-size: .72rem; font-weight: 700; letter-spacing: .6px;
+    text-transform: uppercase; color: rgba(255,255,255,.65); margin-bottom: 6px; }
+.coc-total-amount { font-size: 1.9rem; font-weight: 800; letter-spacing: -1px; }
+.coc-total-sub { font-size: .75rem; color: rgba(255,255,255,.5); margin-top: 4px; }
+.coc-form-box {
+    background: #faf8ff; border: 2px solid #c9baff;
+    border-radius: 14px; padding: 20px 22px;
+}
+.coc-form-title { font-size: .95rem; font-weight: 700; color: #5b2dd9; margin-bottom: 14px; }
+
+/* ── Cọc Grid — CSS-only, đảm bảo thứ tự row-first trên mọi màn hình ─── */
+.coc-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .coc-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Stagger column for tx actions ─────────────────────────────────────── */
+div[data-testid="stHorizontalBlock"]:has(.tx) {
+    align-items: center !important; gap: 6px !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.tx) > div[data-testid="column"]:last-child {
+    flex: 0 0 32px !important; min-width: 32px !important;
+    max-width: 32px !important; padding: 0 !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.tx) > div[data-testid="column"]:last-child button {
+    background: #f0f0f0 !important; border: 1px solid #ddd !important;
+    border-radius: 8px !important; color: #888 !important;
+    font-size: .75rem !important; min-height: 44px !important;
+    height: 44px !important; width: 32px !important;
+    padding: 0 !important; box-shadow: none !important; transform: none !important;
+}
+div[data-testid="stHorizontalBlock"]:has(.tx) > div[data-testid="column"]:last-child button:hover {
+    background: #e8f5ee !important; border-color: #1a9e5f !important;
+    color: #1a7f5a !important; transform: none !important;
+}
+
+/* ── Global Buttons ─────────────────────────────────────────────────────── */
+.stButton > button {
+    background: #1a7f5a; color: white; border: none; border-radius: 10px;
+    font-family: 'Be Vietnam Pro', sans-serif; font-weight: 600;
+    font-size: .9rem; padding: 8px 22px; width: 100%;
+    transition: background .15s, transform .15s, box-shadow .15s;
+}
+.stButton > button:hover {
+    background: #15694a; transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(26,127,90,.25);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-thumb { background: #c4e0d6; border-radius: 3px; }
+
+#MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  SHARED HELPERS (dùng chung BBKN + XNT)
+# INIT SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
-SKIP_KW = ['Tổng cộng','Hội đồng','Trưởng','Trang','Đã kiểm nhập',
-           'Ông/bà','kiểm nhập những','Trang 1']
-THIN = Side(style='thin')
-MED  = Side(style='medium')
-NO_FILL = PatternFill(fill_type=None)
-
-def b_thin(): return Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-def b_med():  return Border(left=THIN, right=THIN, top=MED,  bottom=MED)
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HƯỚNG 1+2: Fill màu cảnh báo hạn dùng
-# ══════════════════════════════════════════════════════════════════════════════
-F_EXPIRED  = PatternFill('solid', fgColor='FF4C4C')   # đỏ  = hết hạn
-F_NEAR_EXP = PatternFill('solid', fgColor='FFD700')   # vàng = cận hạn (<180 ngày)
-
-def _to_date(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)): return None
-    if isinstance(val, datetime.datetime): return val.date()
-    if isinstance(val, datetime.date): return val
-    return None
-
-def expiry_fill(han_val):
-    """Trả về PatternFill phù hợp cho ô Hạn dùng, hoặc None nếu bình thường."""
-    d = _to_date(han_val)
-    if d is None: return None
-    days = (d - datetime.date.today()).days
-    if days < 0: return F_EXPIRED
-    if days < 180: return F_NEAR_EXP
-    return None
-
-def check_expiry_warnings(items, mode='companies'):
-    """
-    Quét danh sách thuốc, trả về (expired_list, near_list).
-    mode='companies' : items = [(name, [rows])]  – BBKN / XNT
-    mode='drugs'     : items = [row]             – BBKK
-    """
-    today  = datetime.date.today()
-    expired, near = [], []
-    def _check(dr, company='', is_bbkk=False):
-        han_raw = dr[7] if not pd.isna(dr[7]) else None
-        d = _to_date(han_raw)
-        if d is None: return
-        ten_idx = 1 if is_bbkk else 2
-        ten = str(dr[ten_idx]).strip() if not pd.isna(dr[ten_idx]) else '?'
-        lo  = str(dr[5]).strip()       if not pd.isna(dr[5])       else ''
-        days = (d - today).days
-        info = {'ten': ten, 'lo': lo, 'han_str': d.strftime('%d/%m/%Y'),
-                'days': days, 'company': company}
-        if days < 0: expired.append(info)
-        elif days < 180: near.append(info)
-    if mode == 'companies':
-        for name, drugs in items:
-            for dr in drugs: _check(dr, company=name, is_bbkk=False)
-    else:
-        for dr in items: _check(dr, company='', is_bbkk=True)
-    return expired, near
-
-def show_expiry_warnings(expired, near, label=''):
-    """Hiển thị bảng cảnh báo trên Streamlit UI (Hướng 1)."""
-    if not expired and not near: return
-    prefix = f' ({label})' if label else ''
-    if expired:
-        st.error(f"🚨 **{len(expired)} thuốc ĐÃ HẾT HẠN{prefix}** — cần xử lý trước khi xuất báo cáo!")
-        df_exp = pd.DataFrame(expired)[['ten','lo','han_str','days','company']]
-        df_exp.columns = ['Tên thuốc','Số lô','Hạn dùng','Số ngày quá hạn','Công ty']
-        df_exp['Số ngày quá hạn'] = df_exp['Số ngày quá hạn'].abs()
-        st.dataframe(df_exp, use_container_width=True, hide_index=True)
-    if near:
-        st.warning(f"⚠️ **{len(near)} thuốc CẬN HẠN{prefix}** (còn dưới 180 ngày) — lưu ý khi xuất!")
-        df_near = pd.DataFrame(near)[['ten','lo','han_str','days','company']]
-        df_near.columns = ['Tên thuốc','Số lô','Hạn dùng','Còn lại (ngày)','Công ty']
-        st.dataframe(df_near, use_container_width=True, hide_index=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HƯỚNG 3: Build bảng tra Số lô + Hạn dùng từ file dữ liệu thô nhập tháng
-# ══════════════════════════════════════════════════════════════════════════════
-def _dc_norm_local(s):
-    if not isinstance(s, str): return ''
-    s = s.strip().lower()
-    s = re.sub(r'_x000a_', ' ', s); s = re.sub(r'\n', ' ', s)
-    s = re.sub(r'[#]', '', s)
-    s = re.sub(r'(\d),(\d)', r'\1.\2', s)
-    s = re.sub(r'(\d)\s+(mg|ml|mcg|μg|g|iu|%|meq|l)', r'\1\2', s)
-    s = re.sub(r'\s*\+\s*', '+', s)
-    return re.sub(r'\s+', ' ', s).strip()
-
-def build_lot_map(df_dulieutho, df_nhap_trong_thang):
-    """
-    Xây dựng 2 bảng tra Số lô + Hạn dùng mới nhất (hạn xa nhất – FEFO tồn cuối):
-      ma_map    : mã_HPT           → {'lo', 'han', 'han_d'}
-      fuzzy_map : (tên_n,nd_n,gia) → {'lo', 'han', 'han_d'}
-
-    Join logic:
-      1. df_nhap_trong_thang: Số HĐ (col9) → Mã HPT (col1)
-      2. df_dulieutho: Số HĐ (col1) → tra Mã HPT → vào ma_map
-         đồng thời → fuzzy_map (fallback Tên+Nồng độ+Đơn giá)
-      3. Giữ entry có hạn dùng xa nhất cho mỗi key
-    """
-    if df_dulieutho is None or df_nhap_trong_thang is None:
-        return {}, {}
-    # Bước 1: Số HĐ → Mã HPT
-    hd_to_ma = {}
-    for _, row in df_nhap_trong_thang.iterrows():
-        try: int(str(row[0]).strip())
-        except: continue
-        if pd.isna(row[1]) or pd.isna(row[9]): continue
-        hd_to_ma[str(row[9]).strip()] = str(row[1]).strip()
-    # Bước 2+3: quét dulieutho
-    ma_map    = {}
-    fuzzy_map = {}
-    for _, row in df_dulieutho.iterrows():
-        try: int(str(row[0]).strip())
-        except: continue
-        if pd.isna(row[2]): continue
-        ten = str(row[2]).strip()
-        nd  = str(row[3]).strip() if not pd.isna(row[3]) else ''
-        lo  = str(row[5]).strip() if not pd.isna(row[5]) else ''
-        han = row[7]
-        gia = float(row[8]) if not pd.isna(row[8]) else 0
-        hd  = str(row[1]).strip() if not pd.isna(row[1]) else ''
-        if not lo: continue
-        han_d = _to_date(han)
-        if han_d is None: continue
-        # Map theo Mã HPT
-        ma = hd_to_ma.get(hd, '')
-        if ma:
-            ex = ma_map.get(ma)
-            if not ex or han_d > ex['han_d']:
-                ma_map[ma] = {'lo': lo, 'han': han, 'han_d': han_d}
-        # Map fuzzy
-        fkey = (_dc_norm_local(ten), _dc_norm_local(nd), int(round(gia)) if gia else 0)
-        exf = fuzzy_map.get(fkey)
-        if not exf or han_d > exf['han_d']:
-            fuzzy_map[fkey] = {'lo': lo, 'han': han, 'han_d': han_d, 'ma': ma}
-    return ma_map, fuzzy_map
-
-def apply_lot_map(lo_raw, han_raw, ten, nd, gia, ma_hpt, ma_map, fuzzy_map):
-    """
-    Tra bảng để lấy Số lô + Hạn dùng mới nhất.
-    Ưu tiên: Mã HPT → fuzzy → giữ nguyên.
-    Chỉ cập nhật nếu thuốc có trong bảng nhập tháng.
-    Trả về: (lo_final, han_final, updated: bool)
-    """
-    if ma_hpt and ma_hpt in ma_map:
-        e = ma_map[ma_hpt]
-        return e['lo'], e['han'], True
-    fkey = (_dc_norm_local(str(ten) if ten else ''),
-            _dc_norm_local(str(nd)  if nd  else ''),
-            int(round(float(gia))) if gia else 0)
-    if fkey in fuzzy_map:
-        e = fuzzy_map[fkey]
-        return e['lo'], e['han'], True
-    return lo_raw, han_raw, False
-
-def safe_set(cell, **kwargs):
-    for k, v in kwargs.items():
-        try: setattr(cell, k, v)
-        except AttributeError: pass
-
-def is_co_row(v0, row):
-    return (isinstance(v0, str) and pd.isna(row[1]) and pd.isna(row[2])
-            and not any(kw in str(v0) for kw in SKIP_KW))
-
-def is_drug_row(v0, col2):
-    try: int(str(v0).strip())
-    except: return False
-    return not pd.isna(col2) and isinstance(col2, str) and not col2.strip().isdigit()
-
-def _find_name_col(row, expected=2):
-    """Nếu cột tên thuốc bị lệch, tìm cột string đầu tiên không phải số trong range [1..5]."""
-    for c in range(1, 6):
-        try:
-            v = row[c]
-        except: continue
-        if not pd.isna(v) and isinstance(v, str) and not str(v).strip().isdigit():
-            return c
-    return expected
-
-def parse_companies(raw_df, qty_col):
-    result, cur, rows, skipped, shift_warnings = [], None, [], 0, []
-    for _, row in raw_df.iterrows():
-        v0 = row[0]
-        if is_co_row(v0, row):
-            name_candidate = ' '.join(str(v0).strip().split())  # normalize whitespace
-            # Bỏ qua dòng công ty trùng tên với công ty đang xử lý (tránh lặp header)
-            if cur and ' '.join(cur.split()) == name_candidate:
-                continue
-            if cur and rows: result.append((cur, rows))
-            cur, rows = name_candidate, []
-        elif is_drug_row(v0, row[2]):
-            try:    qty = float(row[qty_col]) if not pd.isna(row[qty_col]) else 0
-            except: qty = 0
-            if qty != 0: rows.append(row)
-            else: skipped += 1
-        else:
-            # Phát hiện dòng thuốc bị lệch cột (vd: Ramipril có merge cell ở cột trước)
-            try: int(str(v0).strip())
-            except: continue
-            name_col = _find_name_col(row, expected=2)
-            if name_col != 2 and not pd.isna(row[name_col]):
-                offset = name_col - 2
-                new_vals = {}
-                for c in row.index:
-                    src = c + offset
-                    try: new_vals[c] = row[src]
-                    except: new_vals[c] = float('nan')
-                new_vals[0] = row[0]
-                new_row = pd.Series(new_vals)
-                drug_name = str(new_row[2]).strip() if not pd.isna(new_row[2]) else str(v0)
-                shift_warnings.append(f"STT {v0}: '{drug_name}' phát hiện lệch {offset} cột → đã tự căn chỉnh")
-                try:    qty = float(new_row[qty_col]) if not pd.isna(new_row[qty_col]) else 0
-                except: qty = 0
-                if qty != 0: rows.append(new_row)
-                else: skipped += 1
-    if cur and rows: result.append((cur, rows))
-    return result, {'companies': len(result),
-                    'drugs': sum(len(d) for _, d in result),
-                    'skipped': skipped,
-                    'shift_warnings': shift_warnings}
-
-def gs(ws, r, c):
-    cl = ws.cell(row=r, column=c)
-    return {k: copy.copy(getattr(cl, k))
-            for k in ('font','border','alignment','fill','number_format')}
-
-def ap(cell, s):
-    for k, v in s.items():
-        try: setattr(cell, k, copy.copy(v))
-        except AttributeError: pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MODULE BBKN
-# ══════════════════════════════════════════════════════════════════════════════
-BBKN_W = {1:5.5,2:10,3:38,4:17,5:7.5,6:11,7:24,8:11,9:12,10:9.5,11:14,12:8}
-BBKN_A = {1:('center','center'),2:('center','center'),3:('left','center'),
-          4:('left','center'),5:('center','center'),6:('center','center'),
-          7:('left','center'),8:('center','center'),9:('right','center'),
-          10:('right','center'),11:('right','center'),12:('center','center')}
-BBKN_WRAP = {3,4,7}
-BBKN_NUM  = {9,10,11}
-
-def bbkn_h(ws, r):
-    ml = 1
-    for c in BBKN_WRAP:
-        v = ws.cell(row=r, column=c).value
-        if not v or not isinstance(v, str): continue
-        cw = max(BBKN_W.get(c,15)*1.1, 1)
-        ml = max(ml, sum(max(1,math.ceil(len(ln)/cw)) for ln in v.split('\n')))
-    return max(22, min(ml*15.6+4, 120))
-
-def build_bbkn(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
-    wb = load_workbook(io.BytesIO(tmpl_bytes))
-    ws = wb.active
-
-    # Xóa row 14 thừa (dòng trắng giữa header và data) TRƯỚC khi làm bất cứ điều gì khác
-    # để DS và tất cả row numbers dưới đây đều đúng
-    ws.delete_rows(14, 1)
-
-    # Sau khi xóa row 14: row 15 cũ → row 14, row 16 cũ → row 15, ...
-    cs = {c: gs(ws,14,c) for c in range(1,13)}   # style từ dòng công ty (row 14 mới)
-    ds = {c: gs(ws,15,c) for c in range(1,13)}   # style từ dòng data (row 15 mới)
-    tks = gs(ws,212,11)                            # style tổng cộng (row 213 cũ → 212)
-
-    fs = None
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value == 'HỘI ĐỒNG KIỂM NHẬP': fs = cell.row; break
-        if fs: break
-    if not fs: fs = 214
-
-    DS = 14
-    need = sum(1+len(d) for _,d in companies)+1
-    ins = (DS+need-1) - fs + 1
-    if ins > 0: ws.insert_rows(fs, ins); fs += ins
-
-    for m in [str(mr) for mr in ws.merged_cells.ranges if DS <= mr.min_row < fs]:
-        try: ws.unmerge_cells(m)
-        except: pass
-    for r in range(DS, fs):
-        for c in range(1,13):
-            try: ws.cell(row=r,column=c).value = None
-            except: pass
-
-    # Xóa tên công ty thừa trong phần header (row 13) nếu template có sẵn
-    for r in range(13, DS):
-        v0 = ws.cell(row=r, column=1).value
-        if v0 and isinstance(v0, str):
-            s = v0.strip()
-            # Nếu ô này chứa tên công ty (không phải tiêu đề cột) thì xóa
-            is_header_kw = any(kw in s for kw in ['STT','Số chứng','Tên thuốc','Nồng độ','Đơn vị','Thành tiền'])
-            if not is_header_kw:
-                for c in range(1, 13):
-                    try: ws.cell(row=r, column=c).value = None
-                    except: pass
-
-    def wco(rn, name):
-        cl = ws.cell(row=rn, column=1, value=name); ap(cl, cs[1])
-        cl.font = Font(name='Times New Roman', bold=True, size=12); cl.fill = NO_FILL
-        for c in range(2,13):
-            cc = ws.cell(row=rn, column=c); ap(cc, cs[c]); cc.fill = NO_FILL
-        ws.row_dimensions[rn].height = 20
-
-    def wdr(rn, stt, dr):
-        # Hướng 3: cập nhật Số lô (col5) và Hạn dùng (col7) từ bảng nhập tháng
-        ten_raw = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
-        nd_raw  = str(dr[3]).strip() if not pd.isna(dr[3]) else ''
-        gia_raw = float(dr[8]) if not pd.isna(dr[8]) else 0
-        lo_raw  = str(dr[5]).strip() if not pd.isna(dr[5]) else ''
-        han_raw = dr[7] if not pd.isna(dr[7]) else ''
-        ma_hpt  = str(dr[1]).strip() if not pd.isna(dr[1]) else ''
-        if ma_map is not None:
-            lo_use, han_use, _ = apply_lot_map(
-                lo_raw, han_raw, ten_raw, nd_raw, gia_raw, ma_hpt, ma_map, fuzzy_map or {})
-        else:
-            lo_use, han_use = lo_raw, han_raw
-        cols = [
-            (1, stt,                                               'center', False, None),
-            (2, ''if pd.isna(dr[1])else str(dr[1]).strip(),       'center', False, None),
-            (3, ten_raw,                                           'left',   True,  None),
-            (4, nd_raw,                                            'left',   True,  None),
-            (5, ''if pd.isna(dr[4])else str(dr[4]).strip(),       'center', False, None),
-            (6, lo_use,                                            'center', False, None),
-            (7, ''if pd.isna(dr[6])else str(dr[6]).strip(),       'left',   True,  None),
-            (8, han_use if isinstance(han_use, datetime.datetime)
-                else('' if han_use=='' else han_use),             'center', False, 'DD/MM/YYYY'),
-            (9, dr[8] if not pd.isna(dr[8]) else 0,              'right',  False, '#,##0'),
-            (10,int(dr[9]) if not pd.isna(dr[9]) else 0,         'right',  False, '#,##0'),
-        ]
-        for col,val,ha,wrap,fmt in cols:
-            cl = ws.cell(row=rn,column=col,value=val); ap(cl,ds[col])
-            cl.font = Font(name='Times New Roman',size=12)
-            cl.alignment = Alignment(horizontal=ha,vertical='center',wrap_text=wrap)
-            if fmt and val!='': cl.number_format = fmt
-        # Hướng 2: lưu fill cảnh báo vào cache (áp dụng sau post-processing)
-        ef = expiry_fill(han_use)
-        if ef: expiry_fills_bbkn[rn] = ef
-        ck = ws.cell(row=rn,column=11,value=f'=I{rn}*J{rn}'); ap(ck,ds[11])
-        ck.font=Font(name='Times New Roman',size=12)
-        ck.alignment=Alignment(horizontal='right',vertical='center')
-        ck.number_format='#,##0'
-        cl12=ws.cell(row=rn,column=12,value=''); ap(cl12,ds[12])
-
-    cr = DS; drn = []
-    debug_rows = []  # Thu thập dòng bất thường để hiển thị
-    expiry_fills_bbkn = {}  # Hướng 2: cache {row → fill} — áp dụng SAU post-processing
-    for name,drugs in companies:
-        wco(cr,name); cr+=1
-        for i,dr in enumerate(drugs,1):
-            # Kiểm tra dòng bất thường: SL nhập (dr[8]) trống nhưng đơn giá (dr[9]) có
-            sl = dr[8] if not pd.isna(dr[8]) else None
-            dg = dr[9] if not pd.isna(dr[9]) else None
-            if sl is None and dg is not None:
-                debug_rows.append({
-                    'ten': str(dr[2]).strip() if not pd.isna(dr[2]) else '?',
-                    'nd':  str(dr[3]).strip() if not pd.isna(dr[3]) else '',
-                    'sl_raw': [f"col{j}={dr[j]}" for j in range(6,12)
-                               if j < len(dr.index) and not pd.isna(dr[j])]
-                })
-            wdr(cr,i,dr); drn.append(cr); cr+=1
-
-    tr = cr
-    lbl=ws.cell(row=tr,column=1,value='Tổng cộng: ')
-    lbl.font=Font(name='Times New Roman',bold=True,size=12)
-    lbl.alignment=Alignment(horizontal='left',vertical='center'); lbl.border=b_med()
-    for c in range(2,11):
-        try: ws.cell(row=tr,column=c).border=b_med()
-        except: pass
-    ck=ws.cell(row=tr,column=11,value=f'=SUM({",".join(f"K{r}"for r in drn)})')
-    ap(ck,tks); ck.font=Font(name='Times New Roman',bold=True,size=12)
-    ck.alignment=Alignment(horizontal='right',vertical='center')
-    ck.number_format='#,##0'; ck.border=b_med()
-    ws.row_dimensions[tr].height=22
-
-    # Ghi lại tiêu đề cột BBKN (rows 13-14) đúng thứ tự
-    # Unmerge rows 13-14 trước để tránh lỗi MergedCell read-only
-    to_remove_bbkn = [str(mr) for mr in ws.merged_cells.ranges
-                      if mr.min_row <= 14 and mr.max_row >= 13]
-    for m in to_remove_bbkn:
-        try: ws.unmerge_cells(m)
-        except: pass
-
-    bbkn_headers = {
-        1: 'STT', 2: 'Số chứng từ', 3: 'Tên thuốc', 4: 'Nồng độ\nhàm lượng',
-        5: 'Đơn vị tính', 6: 'Số lô', 7: 'Hãng, nước\nsản xuất',
-        8: 'Hạn dùng', 9: 'Đơn giá', 10: 'Số lượng', 11: 'Thành tiền', 12: 'Ghi chú'
-    }
-    for col, hdr in bbkn_headers.items():
-        cl = ws.cell(row=13, column=col)
-        cl.value = hdr
-        safe_set(cl, fill=NO_FILL,
-                 font=Font(name='Times New Roman', bold=True, size=12),
-                 border=b_med(),
-                 alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
-    ws.row_dimensions[13].height = 42
-
-    for r in range(DS,tr+1):
-        av=ws.cell(row=r,column=1).value; cv=ws.cell(row=r,column=3).value
-        is_co=isinstance(av,str) and not str(av).strip().lstrip('-').isdigit() and not cv
-        if r==tr: pass
-        elif is_co:
-            ws.row_dimensions[r].height=20
-            for col in range(1,13):
-                safe_set(ws.cell(row=r,column=col),fill=NO_FILL,border=b_thin(),
-                         font=Font(name='Times New Roman',bold=True,size=12),
-                         alignment=Alignment(horizontal='left',vertical='center'))
-        else:
-            ws.row_dimensions[r].height=bbkn_h(ws,r)
-            for col in range(1,13):
-                cl=ws.cell(row=r,column=col)
-                ha,va=BBKN_A.get(col,('left','center'))
-                safe_set(cl,fill=NO_FILL,border=b_thin(),
-                         font=Font(name='Times New Roman',size=12),
-                         alignment=Alignment(horizontal=ha,vertical=va,wrap_text=col in BBKN_WRAP))
-                if col in BBKN_NUM and cl.value is not None: cl.number_format='#,##0'
-                if col==8 and isinstance(cl.value,datetime.datetime): cl.number_format='DD/MM/YYYY'
-
-    for col,w in BBKN_W.items(): ws.column_dimensions[get_column_letter(col)].width=w
-    # Hướng 2: áp dụng fill cảnh báo hạn dùng (cột 8) SAU tất cả post-processing
-    for _rn, _fill in expiry_fills_bbkn.items():
-        ws.cell(row=_rn, column=8).fill = _fill
-    ws.page_setup.orientation='landscape'; ws.page_setup.paperSize=ws.PAPERSIZE_A4
-    ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0
-    ws.sheet_properties.pageSetUpPr.fitToPage=True
-    for a,v in [('left',.4),('right',.4),('top',.5),('bottom',.5),('header',.2),('footer',.2)]:
-        setattr(ws.page_margins,a,v)
-    ws.print_title_rows='1:13'; ws.freeze_panes=ws.cell(row=DS,column=1)
-
-    out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue(), debug_rows
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MODULE XNT
-# ══════════════════════════════════════════════════════════════════════════════
-XNT_W = {1:5,2:28,3:16,4:7,5:10,6:30,7:11,8:12,9:9,10:9,11:9,12:9,13:14,14:8}
-XNT_A = {1:('center','center'),2:('left','center'),3:('left','center'),
-         4:('center','center'),5:('center','center'),6:('left','center'),
-         7:('center','center'),8:('right','center'),9:('right','center'),
-         10:('right','center'),11:('right','center'),12:('right','center'),
-         13:('right','center'),14:('center','center')}
-XNT_WRAP = {2,3,6}
-XNT_NUM  = {8,9,10,11,12,13}
-
-def xnt_h(ws,r):
-    ml=1
-    for c in XNT_WRAP:
-        v=ws.cell(row=r,column=c).value
-        if not v or not isinstance(v,str): continue
-        cw=max(XNT_W.get(c,15)*1.1,1)
-        ml=max(ml,sum(max(1,math.ceil(len(ln)/cw)) for ln in v.split('\n')))
-    return max(20,min(ml*14.3+4,120))
-
-def build_xnt(tmpl_bytes, companies, ma_map=None, fuzzy_map=None):
-    wb=load_workbook(io.BytesIO(tmpl_bytes))
-    ws=wb.active
-    cs={c:gs(ws,12,c) for c in range(1,15)}
-    ds={c:gs(ws,13,c) for c in range(1,15)}
-
-    fs=None
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value=='Tổng cộng': fs=cell.row; break
-        if fs: break
-    if not fs: fs=279
-
-    ws.delete_rows(fs, 1)
-
-    DS=12
-    need=sum(1+len(d) for _,d in companies)+1
-    data_end=DS+need-1
-    ins=data_end-fs+1
-    if ins>0: ws.insert_rows(fs,ins); fs+=ins
-
-    for m in [str(mr) for mr in ws.merged_cells.ranges if DS<=mr.min_row<fs]:
-        try: ws.unmerge_cells(m)
-        except: pass
-    for r in range(DS,fs):
-        for c in range(1,15):
-            try: ws.cell(row=r,column=c).value=None
-            except: pass
-
-    def wco(rn,name):
-        cl=ws.cell(row=rn,column=1,value=name); ap(cl,cs[1])
-        cl.font=Font(name='Times New Roman',bold=True,size=11); cl.fill=NO_FILL
-        for c in range(2,15):
-            cc=ws.cell(row=rn,column=c); ap(cc,cs[c]); cc.fill=NO_FILL
-        ws.row_dimensions[rn].height=18
-
-    def wdr(rn,stt,dr):
-        # Hướng 3: cập nhật Số lô (col5) và Hạn dùng (col7) từ bảng nhập tháng
-        # XNT: col2=Tên, col3=NồngĐộ, col5=SốLô, col6=HãngSX, col7=HạnDùng, col8=ĐơnGiá
-        # Mã HPT không có trong XNT HPT nên chỉ dùng fuzzy fallback
-        ten_raw = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
-        nd_raw  = str(dr[3]).strip() if not pd.isna(dr[3]) else ''
-        gia_raw = float(dr[8]) if not pd.isna(dr[8]) else 0
-        lo_raw  = str(dr[5]).strip() if not pd.isna(dr[5]) else ''
-        han_raw = dr[7] if not pd.isna(dr[7]) else ''
-        if ma_map is not None:
-            lo_use, han_use, _ = apply_lot_map(
-                lo_raw, han_raw, ten_raw, nd_raw, gia_raw, '', ma_map, fuzzy_map or {})
-        else:
-            lo_use, han_use = lo_raw, han_raw
-        cols=[
-            (1, stt,                                                    'center',False,None),
-            (2, ten_raw,                                                'left',  True, None),
-            (3, nd_raw,                                                 'left',  True, None),
-            (4, ''if pd.isna(dr[4])else str(dr[4]).strip(),            'center',False,None),
-            (5, lo_use,                                                 'center',False,None),
-            (6, ''if pd.isna(dr[6])else str(dr[6]).strip(),            'left',  True, None),
-            (7, han_use if isinstance(han_use,datetime.datetime)
-                else(''if han_use==''else han_use),                    'center',False,'DD/MM/YYYY'),
-            (8, dr[8] if not pd.isna(dr[8])else 0,                    'right', False,'#,##0'),
-            (9, dr[9] if not pd.isna(dr[9])else 0,                    'right', False,'#,##0'),
-            (10,dr[10]if not pd.isna(dr[10])else 0,                   'right', False,'#,##0'),
-            (11,dr[11]if not pd.isna(dr[11])else 0,                   'right', False,'#,##0'),
-            (12,dr[12]if not pd.isna(dr[12])else 0,                   'right', False,'#,##0'),
-        ]
-        for col,val,ha,wrap,fmt in cols:
-            cl=ws.cell(row=rn,column=col,value=val); ap(cl,ds[col])
-            cl.font=Font(name='Times New Roman',size=11)
-            cl.alignment=Alignment(horizontal=ha,vertical='center',wrap_text=wrap)
-            if fmt and val!='': cl.number_format=fmt
-        # Hướng 2: lưu fill cảnh báo vào cache
-        ef = expiry_fill(han_use)
-        if ef: expiry_fills_xnt[rn] = ef
-        cm=ws.cell(row=rn,column=13,value=f'=H{rn}*L{rn}'); ap(cm,ds[13])
-        cm.font=Font(name='Times New Roman',size=11)
-        cm.alignment=Alignment(horizontal='right',vertical='center')
-        cm.number_format='#,##0'
-        cn=ws.cell(row=rn,column=14,value=''); ap(cn,ds[14])
-
-    cr=DS; drn=[]
-    expiry_fills_xnt = {}  # Hướng 2: cache {row → fill}
-    for name,drugs in companies:
-        wco(cr,name); cr+=1
-        for i,dr in enumerate(drugs,1): wdr(cr,i,dr); drn.append(cr); cr+=1
-
-    tr=cr
-    total_val = sum(
-        ws.cell(row=r,column=8).value * ws.cell(row=r,column=12).value
-        for r in drn
-        if isinstance(ws.cell(row=r,column=8).value,(int,float))
-        and isinstance(ws.cell(row=r,column=12).value,(int,float))
-    )
-    lbl=ws.cell(row=tr,column=1,value='Tổng cộng')
-    lbl.font=Font(name='Times New Roman',bold=True,size=11)
-    lbl.alignment=Alignment(horizontal='left',vertical='center'); lbl.border=b_med()
-    for c in range(2,13):
-        try: ws.cell(row=tr,column=c).border=b_med()
-        except: pass
-    cm=ws.cell(row=tr,column=13,value=round(total_val))
-    cm.font=Font(name='Times New Roman',bold=True,size=11)
-    cm.alignment=Alignment(horizontal='right',vertical='center')
-    cm.number_format='#,##0'; cm.border=b_med()
-    ws.row_dimensions[tr].height=20
-
-    for r in range(tr+1, ws.max_row+1):
-        ws.row_dimensions[r].height=22
-        for col in range(1,15):
-            cl=ws.cell(row=r,column=col)
-            if cl.value and isinstance(cl.value,str):
-                cl.value=cl.value.strip()
-                cl.alignment=Alignment(horizontal='center',vertical='center',wrap_text=False)
-                cl.font=Font(name='Times New Roman',size=11)
-
-    for col in range(1,15):
-        for r in range(9,12):
-            safe_set(ws.cell(row=r,column=col),fill=NO_FILL,
-                     font=Font(name='Times New Roman',bold=True,size=11),
-                     border=b_med(),
-                     alignment=Alignment(horizontal='center',vertical='center',wrap_text=True))
-        ws.row_dimensions[r].height=20
-
-    for r in range(DS,tr+1):
-        av=ws.cell(row=r,column=1).value; bv=ws.cell(row=r,column=2).value
-        is_co=isinstance(av,str) and not str(av).strip().lstrip('-').isdigit() and not bv
-        if r==tr: pass
-        elif is_co:
-            ws.row_dimensions[r].height=18
-            for col in range(1,15):
-                safe_set(ws.cell(row=r,column=col),fill=NO_FILL,border=b_thin(),
-                         font=Font(name='Times New Roman',bold=True,size=11),
-                         alignment=Alignment(horizontal='left',vertical='center'))
-        else:
-            ws.row_dimensions[r].height=xnt_h(ws,r)
-            for col in range(1,15):
-                cl=ws.cell(row=r,column=col)
-                ha,va=XNT_A.get(col,('left','center'))
-                safe_set(cl,fill=NO_FILL,border=b_thin(),
-                         font=Font(name='Times New Roman',size=11),
-                         alignment=Alignment(horizontal=ha,vertical=va,wrap_text=col in XNT_WRAP))
-                if col in XNT_NUM and cl.value is not None and cl.value!='': cl.number_format='#,##0'
-                if col==7 and isinstance(cl.value,datetime.datetime): cl.number_format='DD/MM/YYYY'
-
-    for col,w in XNT_W.items(): ws.column_dimensions[get_column_letter(col)].width=w
-    # Hướng 2: áp dụng fill cảnh báo hạn dùng (cột 7) SAU tất cả post-processing
-    for _rn, _fill in expiry_fills_xnt.items():
-        ws.cell(row=_rn, column=7).fill = _fill
-    ws.page_setup.orientation='landscape'; ws.page_setup.paperSize=ws.PAPERSIZE_A4
-    ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0
-    ws.sheet_properties.pageSetUpPr.fitToPage=True
-    for a,v in [('left',.35),('right',.35),('top',.5),('bottom',.5),('header',.2),('footer',.2)]:
-        setattr(ws.page_margins,a,v)
-    ws.print_title_rows='1:11'; ws.freeze_panes=ws.cell(row=DS,column=1)
-
-    out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MODULE ĐỐI CHIẾU DƯỢC – toàn bộ logic từ app_doi_chieu_v5
-# ══════════════════════════════════════════════════════════════════════════════
-
-def dc_norm(s):
-    if not isinstance(s, str): return ""
-    s = s.strip().lower()
-    s = re.sub(r'_x000a_', ' ', s); s = re.sub(r'\n', ' ', s)
-    s = re.sub(r'[#]', '', s)
-    s = re.sub(r'(\d),(\d)', r'\1.\2', s)
-    s = re.sub(r'(\d)\s+(mg|ml|mcg|μg|g|iu|%|meq|l)', r'\1\2', s)
-    s = re.sub(r'\s*\+\s*', '+', s)
-    return re.sub(r'\s+', ' ', s).strip()
-
-def dc_is_drug(s):
-    if not isinstance(s, str): return False
-    s = s.strip()
-    if len(s) < 2: return False
-    try: float(s); return False
-    except: return True
-
-def dc_safe_float(v):
-    try: return float(v)
-    except: return 0.0
-
-def dc_parse_tk(df_raw):
-    rows = []
-    for _, row in df_raw.iloc[5:].iterrows():
-        ma  = str(row[4]).strip() if not pd.isna(row[4]) else ''
-        ten = str(row[5]).strip() if not pd.isna(row[5]) else ''
-        if not ma or not ten: continue
-        gia = dc_safe_float(row[11])
-        rows.append({
-            'ma': ma, 'ten_tk': ten,
-            'nd_tk':   str(row[8]).strip() if not pd.isna(row[8]) else '',
-            'gia_tk':  gia,
-            'nhap_tk': dc_safe_float(row[14]),
-            'xuat_tk': dc_safe_float(row[16]),   # ← Xuất BH T4.26 (col 16)
-            'ton_tk':  dc_safe_float(row[24]),
-            'kten': dc_norm(ten),
-            'knd':  dc_norm(str(row[8]) if not pd.isna(row[8]) else ''),
-            'kgia': int(round(gia)) if gia else 0,
-        })
-    return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
-
-def dc_extract_ma_map(dfs_nhap_xuat):
-    all_rows = []
-    for df in dfs_nhap_xuat:
-        if df is None or df.empty: continue
-        for _, row in df.iterrows():
-            try: int(str(row[0]).strip())
-            except: continue
-            if pd.isna(row[1]) or pd.isna(row[2]): continue
-            ten = str(row[2]).strip()
-            if not dc_is_drug(ten): continue
-            gia = dc_safe_float(row[5])
-            all_rows.append({
-                'ma': str(row[1]).strip(), 'ten': ten,
-                'nd': str(row[3]).strip() if not pd.isna(row[3]) else '',
-                'gia': gia,
-                'kten': dc_norm(ten),
-                'knd':  dc_norm(str(row[3]) if not pd.isna(row[3]) else ''),
-                'kgia': int(round(gia)) if gia else 0,
-            })
-    if not all_rows: return pd.DataFrame()
-    return (pd.DataFrame(all_rows)
-              .drop_duplicates(subset=['ma', 'kten', 'knd', 'kgia'])
-              .reset_index(drop=True))
-
-def dc_parse_raw_lines_bbkn(df_raw, sl_col=9):
-    rows = []
-    for _, row in df_raw.iterrows():
-        try: int(str(row[0]).strip())
-        except: continue
-        if pd.isna(row[2]): continue
-        ten = str(row[2]).strip()
-        if not dc_is_drug(ten): continue
-        nd    = str(row[3]).strip() if not pd.isna(row[3]) else ''
-        gia   = dc_safe_float(row[8])
-        sl    = dc_safe_float(row[sl_col])
-        ma_hd = str(row[1]).strip() if not pd.isna(row[1]) else ''
-        rows.append({'ten': ten, 'nd': nd, 'gia': gia, 'sl': sl, 'ma_hd': ma_hd,
-                     'kten': dc_norm(ten), 'knd': dc_norm(nd),
-                     'kgia': int(round(gia)) if gia else 0})
-    return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
-
-def dc_parse_raw_lines_bbkk(df_raw, sl_col=8):
-    rows = []
-    for _, row in df_raw.iterrows():
-        try: int(str(row[0]).strip())
-        except: continue
-        if pd.isna(row[1]): continue
-        ten = str(row[1]).strip()
-        if not dc_is_drug(ten): continue
-        nd  = str(row[2]).strip() if not pd.isna(row[2]) else ''
-        gia = dc_safe_float(row[4])
-        sl  = dc_safe_float(row[sl_col])
-        rows.append({'ten': ten, 'nd': nd, 'gia': gia, 'sl': sl, 'ma_hd': '',
-                     'kten': dc_norm(ten), 'knd': dc_norm(nd),
-                     'kgia': int(round(gia)) if gia else 0})
-    return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
-
-def dc_match_hpt_to_tk(df_hpt, df_tk, sl_col_tk):
-    results = []
-    used_tk_idx = set()
-
-    def is_active(tk_val):
-        return (sl_col_tk == 'nhap_tk' and tk_val > 0) or \
-               (sl_col_tk == 'ton_tk'  and abs(tk_val) >= 0.01)
-
-    for (kten, knd, kgia), grp_hpt in df_hpt.groupby(['kten', 'knd', 'kgia'], sort=False):
-        mask     = (df_tk['kten']==kten)&(df_tk['knd']==knd)&(df_tk['kgia']==kgia)
-        avail_tk = df_tk[mask & ~df_tk.index.isin(used_tk_idx)]
-        hpt_list = grp_hpt.reset_index(drop=True)
-        sl_sum   = hpt_list['sl'].sum()
-        hoa_don  = ', '.join([v for v in hpt_list['ma_hd'] if v])
-        ten0, nd0, gia0 = hpt_list.iloc[0]['ten'], hpt_list.iloc[0]['nd'], hpt_list.iloc[0]['gia']
-
-        def row_hpt_no_tk():
-            return {'ma': '', 'ten_hpt': ten0, 'nd': nd0, 'gia': gia0,
-                    'sl_hpt': sl_sum, 'hoa_don': hoa_don,
-                    'ten_tk': '', 'sl_tk': None, 'cl': None, 'status': 'hpt_no_tk'}
-
-        def row_matched(sl_hpt, hd, tr):
-            tk_val = tr[sl_col_tk]
-            return {'ma': tr['ma'], 'ten_hpt': ten0, 'nd': nd0, 'gia': gia0,
-                    'sl_hpt': sl_hpt, 'hoa_don': hd,
-                    'ten_tk': tr['ten_tk'], 'sl_tk': tk_val,
-                    'cl': sl_hpt - tk_val, 'status': 'matched'}
-
-        def row_tk_no_hpt(tr):
-            return {'ma': tr['ma'], 'ten_hpt': '', 'nd': tr['nd_tk'], 'gia': tr['gia_tk'],
-                    'sl_hpt': None, 'hoa_don': '',
-                    'ten_tk': tr['ten_tk'], 'sl_tk': tr[sl_col_tk],
-                    'cl': None, 'status': 'tk_no_hpt'}
-
-        if len(avail_tk) == 0:
-            results.append(row_hpt_no_tk()); continue
-
-        active_idx   = [i for i in avail_tk.index if is_active(avail_tk.loc[i, sl_col_tk])]
-        inactive_idx = [i for i in avail_tk.index if not is_active(avail_tk.loc[i, sl_col_tk])]
-
-        for i in inactive_idx:
-            used_tk_idx.add(i)
-
-        if len(active_idx) == 0:
-            results.append(row_hpt_no_tk()); continue
-
-        if len(active_idx) == 1:
-            ti = active_idx[0]
-            results.append(row_matched(sl_sum, hoa_don, df_tk.loc[ti]))
-            used_tk_idx.add(ti); continue
-
-        tk_pool = list(active_idx)
-        matched_tk = set(); matched_hpt = set()
-
-        for hi, hr in hpt_list.iterrows():
-            for ti in tk_pool:
-                if ti in matched_tk: continue
-                if abs(hr['sl'] - df_tk.loc[ti, sl_col_tk]) < 0.01:
-                    results.append(row_matched(hr['sl'], hr['ma_hd'], df_tk.loc[ti]))
-                    matched_tk.add(ti); matched_hpt.add(hi); used_tk_idx.add(ti); break
-
-        for hi, hr in hpt_list.iterrows():
-            if hi in matched_hpt: continue
-            best_ti, best_d = None, float('inf')
-            for ti in tk_pool:
-                if ti in matched_tk: continue
-                d = abs(hr['sl'] - df_tk.loc[ti, sl_col_tk])
-                if d < best_d: best_d, best_ti = d, ti
-            if best_ti is not None:
-                results.append(row_matched(hr['sl'], hr['ma_hd'], df_tk.loc[best_ti]))
-                matched_tk.add(best_ti); used_tk_idx.add(best_ti)
-            else:
-                results.append({'ma': '', 'ten_hpt': hr['ten'], 'nd': hr['nd'], 'gia': hr['gia'],
-                                 'sl_hpt': hr['sl'], 'hoa_don': hr['ma_hd'],
-                                 'ten_tk': '', 'sl_tk': None, 'cl': None, 'status': 'hpt_no_tk'})
-
-        for ti in tk_pool:
-            if ti not in matched_tk:
-                if is_active(df_tk.loc[ti, sl_col_tk]):
-                    results.append(row_tk_no_hpt(df_tk.loc[ti]))
-                used_tk_idx.add(ti)
-
-    for ti, tr in df_tk.iterrows():
-        if ti not in used_tk_idx and is_active(tr[sl_col_tk]):
-            results.append(row_tk_no_hpt(tr))
-
-    return pd.DataFrame(results)
-
-def dc_run_xnt(dfs_nx, df_xnt_raw, df_tk_raw):
-    global_map = dc_extract_ma_map(dfs_nx)
-    if global_map.empty:
-        return None, "Không đọc được dữ liệu từ file nhập/xuất"
-
-    aug = pd.DataFrame([{'ma': '0005301225', 'ten': 'Augmentin 1g', 'nd': '875mg + 125mg',
-                          'gia': 16680, 'kten': dc_norm('Augmentin 1g'),
-                          'knd': dc_norm('875mg + 125mg'), 'kgia': 16680}])
-    global_map = pd.concat([global_map, aug], ignore_index=True).drop_duplicates(
-        subset=['ma', 'kten', 'knd', 'kgia'])
-
-    xnt_rows = []
-    for _, row in df_xnt_raw.iterrows():
-        try: stt = int(str(row[0]).strip())
-        except: continue
-        if pd.isna(row[2]) or not isinstance(row[2], str): continue
-        if row[2].strip().isdigit(): continue
-        xnt_rows.append({
-            'stt': stt, 'ten': str(row[2]).strip(),
-            'nd':  str(row[3]).strip() if not pd.isna(row[3]) else '',
-            'gia': row[8] if not pd.isna(row[8]) else 0,
-            'xuat_xnt': dc_safe_float(row[11]),  # Thực Xuất col 11
-            'ton_xnt':  dc_safe_float(row[12]),
-            'kten': dc_norm(str(row[2])),
-            'knd':  dc_norm(str(row[3]) if not pd.isna(row[3]) else ''),
-            'kgia': int(round(float(row[8]))) if not pd.isna(row[8]) else 0,
-        })
-    df_xnt = pd.DataFrame(xnt_rows)
-    df_tk  = dc_parse_tk(df_tk_raw)
-
-    results = []; used_tk = set()
-
-    def make_row(xr, tr, method):
-        ton_cl  = (xr['ton_xnt']  - tr['ton_tk'])  if tr is not None else None
-        xuat_cl = (xr['xuat_xnt'] - tr['xuat_tk']) if tr is not None else None
-        return {
-            'ma': tr['ma'] if tr is not None else '',
-            'ten': xr['ten'], 'nd': xr['nd'], 'gia': xr['gia'],
-            'xuat_xnt': xr['xuat_xnt'],
-            'ton_xnt':  xr['ton_xnt'],
-            'ten_tk':   tr['ten_tk']  if tr is not None else '',
-            'nd_tk':    tr['nd_tk']   if tr is not None else '',
-            'xuat_tk':  tr['xuat_tk'] if tr is not None else None,
-            'ton_tk':   tr['ton_tk']  if tr is not None else None,
-            'method': method,
-            'cl':      ton_cl,
-            'cl_xuat': xuat_cl,
-        }
-
-    for (kten, knd, kgia), grp_x in df_xnt.groupby(['kten', 'knd', 'kgia'], sort=False):
-        mask  = (df_tk['kten']==kten)&(df_tk['knd']==knd)&(df_tk['kgia']==kgia)
-        grp_t = df_tk[mask & ~df_tk.index.isin(used_tk)].copy()
-
-        if len(grp_x) == 1 and len(grp_t) == 1:
-            xr = grp_x.iloc[0]; tr = grp_t.iloc[0]
-            results.append(make_row(xr, tr, '1-1'))
-            used_tk.add(grp_t.index[0])
-        elif len(grp_x) >= 1 and len(grp_t) > 0:
-            xl = grp_x.reset_index(drop=True); tl = grp_t.reset_index(drop=True)
-            mx, mt = set(), set()
-            for xi, xr in xl.iterrows():
-                for ti, tr in tl.iterrows():
-                    if ti in mt: continue
-                    if abs(xr['ton_xnt'] - tr['ton_tk']) < 0.01:
-                        results.append(make_row(xr, tr, 'exact_ton'))
-                        used_tk.add(grp_t.index[ti]); mx.add(xi); mt.add(ti); break
-            for xi, xr in xl.iterrows():
-                if xi in mx: continue
-                best_d, best_ti, best_tr = float('inf'), None, None
-                for ti, tr in tl.iterrows():
-                    if ti in mt: continue
-                    d = abs(xr['ton_xnt'] - tr['ton_tk'])
-                    if d < best_d: best_d, best_ti, best_tr = d, ti, tr
-                if best_tr is not None:
-                    results.append(make_row(xr, best_tr, 'nearest_ton'))
-                    used_tk.add(grp_t.index[best_ti]); mt.add(best_ti)
-                else:
-                    results.append(make_row(xr, None, 'no_tk'))
-        else:
-            for _, xr in grp_x.iterrows():
-                if xr['ton_xnt'] != 0:
-                    results.append(make_row(xr, None, 'no_tk'))
-
-    for idx, tr in df_tk.iterrows():
-        if idx not in used_tk and (abs(tr['ton_tk']) >= 0.01 or tr['xuat_tk'] > 0):
-            results.append({
-                'ma': tr['ma'], 'ten': '', 'nd': '', 'gia': '',
-                'xuat_xnt': None, 'ton_xnt': None,
-                'ten_tk': tr['ten_tk'],
-                'nd_tk': tr['nd_tk'], 'xuat_tk': tr['xuat_tk'], 'ton_tk': tr['ton_tk'],
-                'method': 'no_xnt', 'cl': None, 'cl_xuat': None,
-            })
-
-    return pd.DataFrame(results), None
-
-def dc_run_kn(df_bbkn_raw, df_tk_raw, global_map, sl_col=9):
-    df_kn = dc_parse_raw_lines_bbkn(df_bbkn_raw, sl_col)
-    if df_kn.empty:
-        return None, "Không đọc được dữ liệu từ file BBKN"
-    df_tk = dc_parse_tk(df_tk_raw)
-    if df_tk.empty:
-        return None, "Không đọc được dữ liệu từ file Thống kê"
-    df_r = dc_match_hpt_to_tk(df_kn, df_tk, 'nhap_tk')
-    df_r = df_r.rename(columns={'sl_hpt': 'nhap_hpt', 'sl_tk': 'nhap_tk'})
-    return df_r, None
-
-def dc_run_kk(df_bbkk_raw, df_tk_raw, global_map, sl_col=8):
-    df_kk = dc_parse_raw_lines_bbkk(df_bbkk_raw, sl_col)
-    if df_kk.empty:
-        return None, "Không đọc được dữ liệu từ file Biên bản kiểm kê"
-    df_tk = dc_parse_tk(df_tk_raw)
-    if df_tk.empty:
-        return None, "Không đọc được dữ liệu từ file Thống kê"
-    df_r = dc_match_hpt_to_tk(df_kk, df_tk, 'ton_tk')
-    df_r = df_r.rename(columns={'sl_hpt': 'sl_kk', 'sl_tk': 'ton_tk'})
-    return df_r, None
-
-
-# ── Excel export helpers ──────────────────────────────────────────────────────
-def _dc_hdr(ws, headers, fill_hex='1F3864'):
-    TH = Side(style='thin'); MH = Side(style='medium')
-    FH = PatternFill('solid', fgColor=fill_hex)
-    for ci, (h, w) in enumerate(headers, 1):
-        c = ws.cell(row=1, column=ci, value=h)
-        c.font = Font(name='Times New Roman', bold=True, size=11, color='FFFFFF')
-        c.fill = FH
-        c.border = Border(left=TH, right=TH, top=MH, bottom=MH)
-        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        ws.column_dimensions[get_column_letter(ci)].width = w
-    ws.row_dimensions[1].height = 36
-
-def _dc_row(ws, ri, vals, fill, right_cols=(), center_cols=()):
-    TH = Side(style='thin')
-    for ci, v in enumerate(vals, 1):
-        safe = '' if (v is None or (isinstance(v, float) and pd.isna(v))) else v
-        c = ws.cell(row=ri, column=ci, value=safe)
-        c.font = Font(name='Times New Roman', size=11)
-        c.fill = fill
-        c.border = Border(left=TH, right=TH, top=TH, bottom=TH)
-        if ci in right_cols:
-            c.alignment = Alignment(vertical='center', horizontal='right')
-            if isinstance(safe, (int, float)): c.number_format = '#,##0.##'
-        elif ci in center_cols:
-            c.alignment = Alignment(vertical='center', horizontal='center')
-        else:
-            c.alignment = Alignment(vertical='center', horizontal='left')
-    ws.row_dimensions[ri].height = 18
-
-FOK = PatternFill('solid', fgColor='E2EFDA')
-FLE = PatternFill('solid', fgColor='FFD7D7')
-FWA = PatternFill('solid', fgColor='FFF9C4')
-FBL = PatternFill('solid', fgColor='DEEBF7')
-FOR = PatternFill('solid', fgColor='FCE4D6')
-
-def dc_build_xnt_sheets(wb, df_res, tn):
-    ws = wb.create_sheet(f"DC XNT {tn.replace('/','_')}")
-    _dc_hdr(ws, [
-        ('Mã HPT',16),('Tên thuốc (HPT)',32),('Tên thuốc (TK)',28),
-        ('Nồng độ',22),('Đơn giá',12),
-        ('Xuất HPT',13),('Xuất TK',13),('CL Xuất',13),
-        ('Tồn cuối HPT',13),('Tồn cuối TK',13),('CL Tồn',13),
-        ('Trạng thái Tồn',20),('Trạng thái Xuất',20),('Phương pháp',18)])
-    mm = {'1-1':'Chính xác','exact_ton':'Khớp tồn','nearest_ton':'Gần nhất ⚠️'}
-    df_m = df_res[df_res['cl'].notna()]
-    df_l = df_m[df_m['cl'].abs()>=0.01].sort_values('cl')
-    df_k = df_m[df_m['cl'].abs()<0.01]
-    for ri,(_, r) in enumerate(pd.concat([df_l,df_k],ignore_index=True).iterrows(), 2):
-        cl      = r['cl']
-        cl_xuat = r.get('cl_xuat', None)
-        # Trạng thái tồn cuối
-        if   abs(cl)<0.01:          fill_ton, st_ton = FOK, '✅ Tồn khớp'
-        elif cl>0:                   fill_ton, st_ton = FLE, f'⬆️ HPT cao hơn {cl:+.0f}'
-        else:                        fill_ton, st_ton = FLE, f'⬇️ HPT thấp hơn {cl:+.0f}'
-        if r['method']=='nearest_ton' and abs(cl)>=0.01: fill_ton = FWA
-        # Trạng thái xuất
-        if cl_xuat is None:          st_xuat = ''
-        elif abs(cl_xuat)<0.01:      st_xuat = '✅ Xuất khớp'
-        elif cl_xuat>0:              st_xuat = f'⬆️ HPT cao hơn {cl_xuat:+.0f}'
-        else:                        st_xuat = f'⬇️ HPT thấp hơn {cl_xuat:+.0f}'
-        # Màu tổng hợp: nếu cả xuất lẫn tồn đều khớp → xanh, còn lại → màu tồn
-        fill = FOK if (abs(cl)<0.01 and (cl_xuat is None or abs(cl_xuat)<0.01)) else fill_ton
-        _dc_row(ws, ri, [
-                r['ma'], r['ten'], r.get('ten_tk',''), r['nd'], r['gia'],
-                r.get('xuat_xnt'), r.get('xuat_tk'), cl_xuat,
-                r['ton_xnt'], r['ton_tk'], cl,
-                st_ton, st_xuat, mm.get(r['method'],'')],
-             fill, right_cols=(5,6,7,8,9,10,11), center_cols=(1,12,13,14))
-    ws.freeze_panes='A2'
-    ws2 = wb.create_sheet("XNT – HPT có, TK không")
-    _dc_hdr(ws2,[('Mã HPT',16),('Tên thuốc HPT',35),('Nồng độ',25),('Đơn giá',12),
-                 ('Xuất HPT',12),('Tồn HPT',12),('Ghi chú',35)])
-    for ri,(_, r) in enumerate(df_res[df_res['method']=='no_tk'].iterrows(), 2):
-        _dc_row(ws2,ri,[r['ma'],r['ten'],r['nd'],r['gia'],
-                        r.get('xuat_xnt'),r['ton_xnt'],'HPT có nhưng TK không theo dõi'],
-             FBL,right_cols=(4,5,6))
-    ws3 = wb.create_sheet("XNT – TK có, HPT không")
-    _dc_hdr(ws3,[('Mã HPT',16),('Tên thuốc TK',35),('Nồng độ TK',25),
-                 ('Xuất TK',12),('Tồn TK',12),('Ghi chú',35)])
-    for ri,(_, r) in enumerate(df_res[df_res['method']=='no_xnt'].iterrows(), 2):
-        _dc_row(ws3,ri,[r['ma'],r['ten_tk'],r['nd_tk'],
-                        r.get('xuat_tk'),r['ton_tk'],'TK có nhưng HPT không phát sinh'],
-             FOR,right_cols=(4,5))
-
-def dc_build_kn_sheets(wb, df_res, tn):
-    ws = wb.create_sheet(f"DC Kiểm nhập {tn.replace('/','_')}")
-    _dc_hdr(ws,[('Mã HPT',16),('Tên thuốc (HPT)',32),('Tên thuốc (TK)',28),
-             ('Nồng độ',22),('Đơn giá',12),('Nhập HPT (tổng)',13),
-             ('Số HĐ',8),('Danh sách HĐ',22),('Nhập TK',12),('Chênh lệch',13),('Trạng thái',28)])
-    df_m = df_res[df_res['status']=='matched']
-    df_l = df_m[df_m['cl'].abs()>=0.01].sort_values('cl')
-    df_k = df_m[df_m['cl'].abs()<0.01]
-    for ri,(_, r) in enumerate(pd.concat([df_l,df_k],ignore_index=True).iterrows(), 2):
-        cl = r['cl']
-        if abs(cl)<0.01:  fill,st = FOK,'✅ Khớp'
-        elif cl>0:         fill,st = FLE,f'⬆️ HPT cao hơn {cl:+.0f}'
-        else:              fill,st = FLE,f'⬇️ HPT thấp hơn {cl:+.0f}'
-        _dc_row(ws,ri,[r['ma'],r['ten_hpt'],r['ten_tk'],r['nd'],r['gia'],
-                    r['nhap_hpt'],r.get('n_hoadon',''),r.get('hoa_don',''),
-                    r['nhap_tk'],cl,st],
-             fill,right_cols=(5,6,8,9,10),center_cols=(1,11))
-    ws.freeze_panes='A2'
-    ws2 = wb.create_sheet("KN – HPT có, TK không")
-    _dc_hdr(ws2,[('Mã HPT',16),('Tên thuốc HPT',35),('Nồng độ',25),('Đơn giá',12),
-              ('Nhập HPT (tổng)',13),('Danh sách HĐ',22),('Ghi chú',35)])
-    for ri,(_, r) in enumerate(df_res[df_res['status']=='hpt_no_tk'].iterrows(), 2):
-        _dc_row(ws2,ri,[r['ma'],r['ten_hpt'],r['nd'],r['gia'],r['nhap_hpt'],
-                     r.get('hoa_don',''),'HPT có nhưng TK không có số nhập'],
-             FBL,right_cols=(3,4,5))
-    ws3 = wb.create_sheet("KN – TK có, HPT không")
-    _dc_hdr(ws3,[('Mã HPT',16),('Tên thuốc TK',35),('Nồng độ TK',25),('Nhập TK',12),('Ghi chú',35)])
-    for ri,(_, r) in enumerate(df_res[df_res['status']=='tk_no_hpt'].iterrows(), 2):
-        _dc_row(ws3,ri,[r['ma'],r['ten_tk'],r['nd'],r['nhap_tk'],'TK có nhập nhưng HPT không có'],
-             FOR,right_cols=(4,))
-
-def dc_build_kk_sheets(wb, df_res, tn):
-    ws = wb.create_sheet(f"DC Kiểm kê {tn.replace('/','_')}")
-    _dc_hdr(ws,[('Mã HPT',16),('Tên thuốc (HPT)',32),('Tên thuốc (TK)',28),
-             ('Nồng độ',22),('Đơn giá',12),('SL Kiểm kê (tổng)',14),
-             ('Tồn cuối TK',13),('Chênh lệch',13),('Trạng thái',28)])
-    df_m = df_res[df_res['status']=='matched']
-    df_l = df_m[df_m['cl'].abs()>=0.01].sort_values('cl')
-    df_k = df_m[df_m['cl'].abs()<0.01]
-    for ri,(_, r) in enumerate(pd.concat([df_l,df_k],ignore_index=True).iterrows(), 2):
-        cl = r['cl']
-        if abs(cl)<0.01:  fill,st = FOK,'✅ Khớp'
-        elif cl>0:         fill,st = FLE,f'⬆️ HPT cao hơn {cl:+.0f}'
-        else:              fill,st = FLE,f'⬇️ HPT thấp hơn {cl:+.0f}'
-        _dc_row(ws,ri,[r['ma'],r['ten_hpt'],r['ten_tk'],r['nd'],r['gia'],
-                    r['sl_kk'],r['ton_tk'],cl,st],
-             fill,right_cols=(5,6,7,8),center_cols=(1,9))
-    ws.freeze_panes='A2'
-    ws2 = wb.create_sheet("KK – HPT có, TK không")
-    _dc_hdr(ws2,[('Mã HPT',16),('Tên thuốc HPT',35),('Nồng độ',25),('Đơn giá',12),
-              ('SL Kiểm kê',12),('Ghi chú',35)])
-    for ri,(_, r) in enumerate(df_res[df_res['status']=='hpt_no_tk'].iterrows(), 2):
-        _dc_row(ws2,ri,[r['ma'],r['ten_hpt'],r['nd'],r['gia'],r['sl_kk'],'HPT có nhưng TK không theo dõi tồn'],
-             FBL,right_cols=(3,4,5))
-    ws3 = wb.create_sheet("KK – TK có, HPT không")
-    _dc_hdr(ws3,[('Mã HPT',16),('Tên thuốc TK',35),('Nồng độ TK',25),('Tồn TK',12),('Ghi chú',35)])
-    for ri,(_, r) in enumerate(df_res[df_res['status']=='tk_no_hpt'].iterrows(), 2):
-        _dc_row(ws3,ri,[r['ma'],r['ten_tk'],r['nd'],r['ton_tk'],'TK có tồn nhưng không có trong kiểm kê'],
-             FOR,right_cols=(4,))
-
-def dc_build_summary(wb, results_map, tn):
-    ws = wb.create_sheet("📊 Tóm tắt", 0)
-    ws.column_dimensions['A'].width = 45; ws.column_dimensions['B'].width = 18
-    def wr(ri,k,v,bold=False):
-        c1=ws.cell(row=ri,column=1,value=k); c2=ws.cell(row=ri,column=2,value=v)
-        c1.font=Font(name='Times New Roman',bold=bold,size=12 if bold else 11)
-        c2.font=Font(name='Times New Roman',size=11)
-    ri=1; wr(ri,f'BÁO CÁO ĐỐI CHIẾU DƯỢC – {tn}','',bold=True); ri+=2
-    for item in results_map:
-        label,df_r,col_cl,col_st,no_vals,no_labels = item[:6]
-        extra_cl = item[6] if len(item) > 6 else None  # optional extra CL col (vd: cl_xuat)
-        extra_label = item[7] if len(item) > 7 else None
-        wr(ri,f'── {label} ──','',bold=True); ri+=1
-        if df_r is not None and col_cl:
-            m=df_r[df_r[col_cl].notna()]
-            nk=(m[col_cl].abs()<0.01).sum(); nl=(m[col_cl].abs()>=0.01).sum()
-            pct=nk/(nk+nl)*100 if (nk+nl)>0 else 0
-            wr(ri,'  ✅ Tồn cuối – Khớp',f'{nk} dòng'); ri+=1
-            wr(ri,'  ⚠️  Tồn cuối – Chênh lệch',f'{nl} dòng'); ri+=1
-            wr(ri,'  📊 Tỷ lệ tồn khớp',f'{pct:.1f}%'); ri+=1
-        if extra_cl and df_r is not None and extra_cl in df_r.columns:
-            mx=df_r[df_r[extra_cl].notna()]
-            nkx=(mx[extra_cl].abs()<0.01).sum(); nlx=(mx[extra_cl].abs()>=0.01).sum()
-            pctx=nkx/(nkx+nlx)*100 if (nkx+nlx)>0 else 0
-            lbl = extra_label or extra_cl
-            wr(ri,f'  ✅ {lbl} – Khớp',f'{nkx} dòng'); ri+=1
-            wr(ri,f'  ⚠️  {lbl} – Chênh lệch',f'{nlx} dòng'); ri+=1
-            wr(ri,f'  📊 Tỷ lệ {lbl.lower()} khớp',f'{pctx:.1f}%'); ri+=1
-        if df_r is not None and col_st:
-            for nv,nl2 in zip(no_vals,no_labels):
-                cnt=(df_r[col_st]==nv).sum()
-                wr(ri,f'  📋 {nl2}',f'{cnt} dòng'); ri+=1
-        ri+=1
-
-def dc_export_excel(res_xnt, res_kn, res_kk, tn):
-    wb=Workbook(); wb.remove(wb.active)
-    if res_xnt is not None: dc_build_xnt_sheets(wb, res_xnt, tn)
-    if res_kn  is not None: dc_build_kn_sheets(wb, res_kn, tn)
-    if res_kk  is not None: dc_build_kk_sheets(wb, res_kk, tn)
-    rm=[]
-    if res_xnt is not None:
-        rm.append(('Đối chiếu XNT',res_xnt,'cl','method',
-                   ['no_tk','no_xnt'],['HPT có – TK không','TK có – HPT không'],
-                   'cl_xuat','Xuất kho'))
-    if res_kn is not None:
-        rm.append(('Đối chiếu Kiểm nhập',res_kn,'cl','status',
-                   ['hpt_no_tk','tk_no_hpt'],['HPT có – TK không','TK có – HPT không']))
-    if res_kk is not None:
-        rm.append(('Đối chiếu Kiểm kê',res_kk,'cl','status',
-                   ['hpt_no_tk','tk_no_hpt'],['HPT có – TK không','TK có – HPT không']))
-    dc_build_summary(wb, rm, tn)
-    buf=io.BytesIO(); wb.save(buf); buf.seek(0)
-    return buf.getvalue()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MODULE BBKK – Biên Bản Kiểm Kê
-# ══════════════════════════════════════════════════════════════════════════════
-import calendar
-
-def get_last_day(thang, nam):
-    """Trả về ngày cuối tháng."""
-    return calendar.monthrange(nam, thang)[1]
-
-def ten_thang_viet(thang):
-    return f"Tháng {thang}"
-
-def format_ngay_viet(ngay, thang, nam):
-    return f"ngày {ngay} tháng {thang} năm {nam}"
-
-BBKK_W = {1:5, 2:35, 3:14, 4:7.5, 5:10, 6:10, 7:32, 8:11, 9:11, 10:10, 11:10, 12:8}
-BBKK_A = {1:('center','center'), 2:('left','center'), 3:('left','center'),
-          4:('center','center'), 5:('right','center'), 6:('center','center'),
-          7:('left','center'),   8:('center','center'), 9:('right','center'),
-          10:('right','center'), 11:('right','center'), 12:('center','center')}
-BBKK_WRAP = {2, 3, 7}
-BBKK_NUM  = {5, 9, 10}
-
-def bbkk_h(ws, r):
-    ml = 1
-    for c in BBKK_WRAP:
-        v = ws.cell(row=r, column=c).value
-        if not v or not isinstance(v, str): continue
-        cw = max(BBKK_W.get(c, 15) * 1.1, 1)
-        ml = max(ml, sum(max(1, math.ceil(len(ln)/cw)) for ln in v.split('\n')))
-    return max(20, min(ml * 14.3 + 4, 120))
-
-def parse_bbkk_raw(raw_df):
-    """
-    Parse dữ liệu thô BBKK từ HPT.
-    Columns in raw: 0=STT, 1=TenThuoc, 2=NongDo, 3=DVT, 4=DonGia,
-                    5=SoLo, 6=HangSX, 7=HanDung, 8=SLSoSach, 9=ThanhTien, 10=SLThucTe
-    Lọc dòng SL Thực tế = 0 (col 10); nếu col10 NaN dùng col8.
-    Tự động phát hiện dòng bị lệch cột (vd: Ramipril có dòng phụ "Tân giao...").
-    Trả về list of row (pandas Series)
-    """
-    drugs, skipped = [], 0
-
-    # Xác định số cột tối đa của raw_df
-    max_col = max(raw_df.columns) if len(raw_df.columns) else 10
-
-    def _try_parse_row(row):
-        """
-        Cố gắng đọc 1 dòng có STT hợp lệ.
-        Trả về row đã chuẩn hoá (hoặc None nếu bỏ qua).
-        Logic: cột 1 phải là tên thuốc (string). Nếu col1 là số/NaN thì thử dịch phải.
-        """
-        # Kiểm tra col 1 là tên thuốc bình thường
-        v1 = row.get(1, float('nan')) if hasattr(row, 'get') else (row[1] if 1 in row.index else float('nan'))
-        if not pd.isna(v1) and isinstance(v1, str) and v1.strip() and not v1.strip().replace('.','',1).isdigit():
-            return row  # dòng bình thường
-
-        # col1 bị lệch → tìm cột string đầu tiên trong phạm vi [1..4]
-        for shift in range(1, 5):
-            cidx = 1 + shift
-            if cidx > max_col:
-                break
-            vc = row[cidx] if cidx in row.index else float('nan')
-            if not pd.isna(vc) and isinstance(vc, str) and vc.strip() and not vc.strip().replace('.','',1).isdigit():
-                # Dịch toàn bộ cột sang trái 'shift' bước, giữ nguyên col 0
-                new_vals = {0: row[0]}
-                for c in range(1, max_col + 1):
-                    src = c + shift
-                    new_vals[c] = row[src] if src in row.index else float('nan')
-                return pd.Series(new_vals)
-        return None  # không tìm được → bỏ qua
-
-    for _, row in raw_df.iterrows():
-        try:
-            int(str(row[0]).strip())
-        except:
-            # Dòng không có STT số: có thể là dòng phụ nồng độ/thành phần (vd: "Tân giao 1,33g")
-            # Nếu col1 có text và col0 NaN/empty → bỏ qua hoàn toàn
-            continue
-
-        fixed_row = _try_parse_row(row)
-        if fixed_row is None:
-            skipped += 1
-            continue
-
-        v1 = fixed_row[1] if 1 in fixed_row.index else float('nan')
-        if pd.isna(v1) or not isinstance(v1, str):
-            skipped += 1
-            continue
-
-        # Số lượng thực tế: col 10 nếu có, else col 8
-        col10 = fixed_row[10] if 10 in fixed_row.index else float('nan')
-        col8  = fixed_row[8]  if 8  in fixed_row.index else float('nan')
-        sl_tt = col10 if not pd.isna(col10) else (col8 if not pd.isna(col8) else 0)
-        try:
-            sl_tt = float(sl_tt)
-        except:
-            sl_tt = 0
-        if sl_tt == 0:
-            skipped += 1
-            continue
-        drugs.append(fixed_row)
-    return drugs, {'drugs': len(drugs), 'skipped': skipped}
-
-def build_bbkk(tmpl_bytes, drugs, thang, nam, ma_map=None, fuzzy_map=None):
-    """
-    Điền dữ liệu vào form BBKK chuẩn.
-    Tự động cập nhật tháng/năm trong tiêu đề và ngày kiểm kê.
-    """
-    wb = load_workbook(io.BytesIO(tmpl_bytes))
-    ws = wb.active
-
-    last_day = get_last_day(thang, nam)
-
-    # ── Cập nhật tiêu đề tháng/năm ──────────────────────────────────────────
-    # R3C5: "Tháng X năm YYYY"
-    ws.cell(row=3, column=5).value = f"Tháng {thang} năm {nam}"
-
-    # R10C1: dòng kiểm kê tại...
-    old_r10 = ws.cell(row=10, column=1).value or ''
-    # Thay thế toàn bộ ngày giờ trong dòng R10
-    import re as _re
-    new_r10 = _re.sub(
-        r'ngày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
-        f'ngày {last_day} tháng {thang} năm {nam}',
-        old_r10
-    )
-    ws.cell(row=10, column=1).value = new_r10
-
-    # ── Ghi lại tiêu đề cột BBKK (rows 11-12) để đảm bảo đúng thứ tự ──────────
-    # Trước tiên unmerge tất cả merged cells ở rows 11-12 để tránh lỗi MergedCell read-only
-    to_remove_hdr = [str(mr) for mr in ws.merged_cells.ranges
-                     if mr.min_row <= 12 and mr.max_row >= 11]
-    for m in to_remove_hdr:
-        try: ws.unmerge_cells(m)
-        except: pass
-
-    # Row 11: tiêu đề chính
-    bbkk_headers = {
-        1: 'STT', 2: 'Tên thuốc - Nồng độ - Hàm lượng', 3: '',
-        4: 'Đơn vị tính', 5: 'Đơn giá', 6: 'Số lô',
-        7: 'Hãng sản xuất', 8: 'Hạn dùng',
-        9: 'Số lượng', 10: '', 11: 'Hỏng', 12: 'Ghi chú'
-    }
-    for col, hdr in bbkk_headers.items():
-        cl = ws.cell(row=11, column=col)
-        cl.value = hdr
-        safe_set(cl, fill=NO_FILL,
-                 font=Font(name='Times New Roman', bold=True, size=11),
-                 border=b_med(),
-                 alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
-    ws.row_dimensions[11].height = 30
-    # Row 12: sub-header "Sổ sách"/"Thực tế" cho cột SL, còn lại blank
-    bbkk_sub = {9: 'Sổ sách', 10: 'Thực tế'}
-    for col in range(1, 13):
-        cl = ws.cell(row=12, column=col)
-        cl.value = bbkk_sub.get(col, None)
-        safe_set(cl, fill=NO_FILL,
-                 font=Font(name='Times New Roman', bold=True, size=11),
-                 border=b_med(),
-                 alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
-    ws.row_dimensions[12].height = 16
-
-    # ── Lấy style từ template ────────────────────────────────────────────────
-    DS = 13  # data start row (row 13 = first data row in template, rows 11-12 = headers)
-    cs = {c: gs(ws, DS, c) for c in range(1, 13)}
-    ds = {c: gs(ws, DS+1 if ws.max_row > DS else DS, c) for c in range(1, 13)}
-
-    # Lấy style từ row đầu tiên có số liệu
-    first_data_row = None
-    for r in range(DS, min(DS+5, ws.max_row+1)):
-        if ws.cell(row=r, column=1).value is not None:
-            first_data_row = r
-            break
-    if first_data_row:
-        ds = {c: gs(ws, first_data_row, c) for c in range(1, 13)}
-
-    # ── Tìm TẤT CẢ vị trí "Tổng khoản" → dùng dòng CUỐI CÙNG, xóa các dòng cũ ──
-    tk_rows = []
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value and 'Tổng khoản' in str(cell.value):
-                tk_rows.append(cell.row)
-    # Dùng dòng Tổng khoản cuối cùng làm mốc (đó là dòng template gốc đúng)
-    if tk_rows:
-        fs = max(tk_rows)
-        # Xóa nội dung tất cả các dòng Tổng khoản cũ khác (ngoài dòng cuối)
-        for old_tk in tk_rows:
-            for c in range(1, 12):
-                try: ws.cell(row=old_tk, column=c).value = None
-                except: pass
-    else:
-        fs = DS + 185  # fallback
-
-    # Xóa dữ liệu cũ từ DS đến fs (bao gồm cả dòng Tổng khoản cuối cùng)
-    # Unmerge TOÀN BỘ sheet từ DS trở xuống để tránh MergedCell khi insert rows
-    # (đặc biệt dòng chữ ký có merge cells sẽ xung đột nếu data insert vào đúng dòng đó)
-    all_merges = [str(mr) for mr in ws.merged_cells.ranges if mr.min_row >= DS]
-    for m in all_merges:
-        try: ws.unmerge_cells(m)
-        except: pass
-    for r in range(DS, fs + 1):
-        for c in range(1, 13):
-            try: ws.cell(row=r, column=c).value = None
-            except: pass
-
-    # ── Insert rows nếu cần ─────────────────────────────────────────────────
-    need = len(drugs) + 1  # +1 cho dòng Tổng khoản
-    current_space = fs - DS  # số dòng data hiện có (không tính dòng Tổng khoản)
-    if need > current_space:
-        ins = need - current_space
-        ws.insert_rows(fs, ins)
-        fs += ins
-
-    # ── Ghi dữ liệu ──────────────────────────────────────────────────────────
-    def wdr_kk(rn, stt, dr):
-        ten = str(dr[1]).strip() if not pd.isna(dr[1]) else ''
-        nd  = str(dr[2]).strip() if not pd.isna(dr[2]) else ''
-        # Form BBKK: 1=STT 2=TênThuốc 3=NồngĐộ 4=DVT 5=ĐơnGiá 6=SốLô 7=HãngSX 8=HạnDùng 9=SLSổSách 10=SLThựcTế 11=Hỏng 12=GhiChú
-        # Raw data: col0=STT col1=Tên col2=NồngĐộ col3=DVT col4=ĐơnGiá col5=SốLô col6=HãngSX col7=HạnDùng col8=SLSổSách col10=SLThựcTế
-        # Hướng 3: tra bảng lô/hạn mới nhất (BBKK không có Mã HPT nên dùng fuzzy)
-        gia_raw = float(dr[4]) if not pd.isna(dr[4]) else 0
-        lo_raw  = str(dr[5]).strip() if not pd.isna(dr[5]) else ''
-        han_raw = dr[7] if not pd.isna(dr[7]) else ''
-        if ma_map is not None:
-            lo_use, han_use, _ = apply_lot_map(
-                lo_raw, han_raw, ten, nd, gia_raw, '', ma_map, fuzzy_map or {})
-        else:
-            lo_use, han_use = lo_raw, han_raw
-        cols = [
-            (1,  stt,                                                'center', False, None),
-            (2,  ten,                                                'left',   True,  None),
-            (3,  nd,                                                 'left',   False, None),
-            (4,  str(dr[3]).strip() if not pd.isna(dr[3]) else '',   'center', False, None),
-            (5,  gia_raw,                                            'right',  False, '#,##0'),
-            (6,  lo_use,                                             'center', False, None),
-            (7,  str(dr[6]).strip() if not pd.isna(dr[6]) else '',   'left',   True,  None),
-            (8,  han_use if isinstance(han_use, datetime.datetime)
-                 else ('' if han_use == '' else han_use),            'center', False, 'DD/MM/YYYY'),
-            (9,  float(dr[8]) if not pd.isna(dr[8]) else 0,         'right',  False, '#,##0'),
-        ]
-        col10 = dr[10] if 10 in dr.index and not pd.isna(dr[10]) else (dr[8] if not pd.isna(dr[8]) else 0)
-        try: sl_tt = float(col10)
-        except: sl_tt = 0
-        cols.append((10, sl_tt, 'right', False, '#,##0'))
-        for col, val, ha, wrap, fmt in cols:
-            cl = ws.cell(row=rn, column=col, value=val)
-            ap(cl, ds[col])
-            cl.font = Font(name='Times New Roman', size=11)
-            cl.alignment = Alignment(horizontal=ha, vertical='center', wrap_text=wrap)
-            if fmt and val != '': cl.number_format = fmt
-        # Hướng 2: lưu fill cảnh báo vào cache
-        ef = expiry_fill(han_use)
-        if ef: expiry_fills_bbkk[rn] = ef
-        # Cột 11 (Hỏng) và 12 (Ghi chú) để trống
-        for c in (11, 12):
-            if c in ds:
-                cc = ws.cell(row=rn, column=c, value='')
-                ap(cc, ds[c])
-
-    stt = 1
-    expiry_fills_bbkk = {}  # Hướng 2: cache {row → fill}
-    for dr in drugs:
-        wdr_kk(DS + stt - 1, stt, dr)
-        stt += 1
-
-    # ── Dòng Tổng khoản ──────────────────────────────────────────────────────
-    tr = DS + len(drugs)
-    lbl = ws.cell(row=tr, column=2, value=f'Tổng khoản: {len(drugs)} khoản')
-    lbl.font = Font(name='Times New Roman', bold=True, size=11)
-    lbl.alignment = Alignment(horizontal='left', vertical='center')
-    lbl.border = b_med()
-    ws.cell(row=tr, column=1).border = b_med()
-    for c in range(3, 13):
-        ws.cell(row=tr, column=c).border = b_med()
-    ws.row_dimensions[tr].height = 20
-
-    # Xóa nội dung dòng ngay sau Tổng khoản nếu là dòng trống/rác thừa
-    tr_next = tr + 1
-    next_vals = [ws.cell(row=tr_next, column=c).value for c in range(1, 13)]
-    if all(v is None or (isinstance(v, str) and not v.strip()) for v in next_vals):
-        ws.delete_rows(tr_next, 1)
-
-    # ── Format vùng data ─────────────────────────────────────────────────────
-    for r in range(DS, tr):
-        ws.row_dimensions[r].height = bbkk_h(ws, r)
-        for col in range(1, 13):
-            cl = ws.cell(row=r, column=col)
-            ha, va = BBKK_A.get(col, ('left', 'center'))
-            safe_set(cl, fill=NO_FILL, border=b_thin(),
-                     font=Font(name='Times New Roman', size=11),
-                     alignment=Alignment(horizontal=ha, vertical=va, wrap_text=col in BBKK_WRAP))
-            if col in BBKK_NUM and cl.value is not None and cl.value != '':
-                cl.number_format = '#,##0'
-            if col == 8 and isinstance(cl.value, datetime.datetime):
-                cl.number_format = 'DD/MM/YYYY'
-    # Hướng 2: áp dụng fill cảnh báo hạn dùng (cột 8) SAU tất cả post-processing
-    for _rn, _fill in expiry_fills_bbkk.items():
-        ws.cell(row=_rn, column=8).fill = _fill
-
-    # ── Cập nhật footer: ngày ký biên bản (dòng cuối) ────────────────────────
-    # Tìm dòng có "Ngày" hoặc "ngày" trong phần cuối
-    for r in range(tr+1, min(tr+15, ws.max_row+1)):
-        v = ws.cell(row=r, column=1).value
-        if v and isinstance(v, str) and re.search(r'[Nn]gày', v):
-            ws.cell(row=r, column=1).value = re.sub(
-                r'[Nn]gày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
-                lambda m: f'{"Ngày" if m.group(0)[0]=="N" else "ngày"} {last_day} tháng {thang} năm {nam}',
-                v
-            )
-            break
-
-    # ── Sửa thứ tự: chức vụ phải ở TRÊN, tên ở DƯỚI ──────────────────────────
-    # Quét các cột chữ ký trong footer (cols 1,2,4,6,8,10...)
-    # Mẫu đúng: hàng chức vụ (DS CKII, Lê Xuân Bình...) → hàng để trống → hàng tên
-    # Nếu phát hiện tên (họ tên đầy đủ kiểu "Ds. Xxx", "DS CKII Xxx") ở trên
-    # và chức vụ text ngắn hơn ở dưới thì hoán vị
-    def _looks_like_title(s):
-        """Chuỗi là chức vụ/chức danh: không có dấu chấm họ tên, thường là từ khóa"""
-        kws = ['Trưởng', 'Phòng', 'Thống kê', 'Thủ kho', 'Hội đồng', 'TCKT', 'Dược']
-        return any(k in s for k in kws)
-    def _looks_like_name(s):
-        """Chuỗi là tên người: có 'Ds.', 'DS', hoặc >= 2 từ viết hoa"""
-        if re.match(r'^(Ds\.|DS|Ths\.|PGS|GS)', s.strip()): return True
-        words = s.strip().split()
-        return len(words) >= 2 and sum(1 for w in words if w and w[0].isupper()) >= 2
-
-    footer_start = tr + 1
-    footer_end   = ws.max_row
-    # Duyệt từng cột footer quan trọng
-    for col in range(1, ws.max_column + 1):
-        col_vals = {}
-        for r in range(footer_start, footer_end + 1):
-            v = ws.cell(row=r, column=col).value
-            if v and isinstance(v, str) and v.strip():
-                col_vals[r] = v.strip()
-        if len(col_vals) < 2:
-            continue
-        rows_sorted = sorted(col_vals.keys())
-        # Lấy 2 dòng đầu tiên có nội dung
-        r1, r2 = rows_sorted[0], rows_sorted[1]
-        v1, v2 = col_vals[r1], col_vals[r2]
-        # Nếu dòng trên là tên người, dòng dưới là chức vụ → hoán đổi
-        if _looks_like_name(v1) and _looks_like_title(v2):
-            ws.cell(row=r1, column=col).value = v2
-            ws.cell(row=r2, column=col).value = v1
-
-    for col, w in BBKK_W.items():
-        ws.column_dimensions[get_column_letter(col)].width = w
-    ws.page_setup.orientation = 'portrait'
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    for a, v in [('left', .5), ('right', .5), ('top', .7), ('bottom', .7),
-                 ('header', .3), ('footer', .3)]:
-        setattr(ws.page_margins, a, v)
-    ws.print_title_rows = '1:12'
-    ws.freeze_panes = ws.cell(row=DS, column=1)
-
-    out = io.BytesIO(); wb.save(out); out.seek(0)
-    return out.getvalue()
-
-
-def update_xnt_dates(tmpl_bytes, thang, nam):
-    """Cập nhật tháng/năm trong template XNT."""
-    wb = load_workbook(io.BytesIO(tmpl_bytes))
-    ws = wb.active
-    last_day = get_last_day(thang, nam)
-    import re as _re
-
-    def _replace_dates(v):
-        # Thay "Tháng X năm YYYY" hoặc "Tháng X Năm YYYY" (cả N hoa lẫn n thường)
-        v = _re.sub(r'Tháng\s+\d+\s+[Nn]ăm\s+\d+',
-                    lambda m: f'Tháng {thang} {"Năm" if "Năm" in m.group(0) else "năm"} {nam}', v)
-        # Thay "ngày X tháng Y năm Z" (chữ n thường hoặc N hoa)
-        v = _re.sub(r'[Nn]gày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
-                    lambda m: f'{"Ngày" if m.group(0)[0]=="N" else "ngày"} {last_day} tháng {thang} năm {nam}', v)
-        return v
-
-    # Quét toàn bộ sheet (header + footer đều cần cập nhật)
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
-            if not v or not isinstance(v, str): continue
-            new_v = _replace_dates(v)
-            if new_v != v:
-                ws.cell(row=r, column=c).value = new_v
-    out = io.BytesIO(); wb.save(out); out.seek(0)
-    return out.getvalue()
-
-
-def update_bbkn_dates(tmpl_bytes, thang, nam):
-    """Cập nhật tháng/năm trong template BBKN."""
-    wb = load_workbook(io.BytesIO(tmpl_bytes))
-    ws = wb.active
-    last_day = get_last_day(thang, nam)
-    import re as _re
-
-    def _replace_dates(v):
-        v = _re.sub(r'Tháng\s+\d+\s+năm\s+\d+', f'Tháng {thang} năm {nam}', v)
-        v = _re.sub(r'[Nn]gày\s+\d+\s+tháng\s+\d+\s+năm\s+\d+',
-                    lambda m: f'{"Ngày" if m.group(0)[0]=="N" else "ngày"} {last_day} tháng {thang} năm {nam}', v)
-        return v
-
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
-            if not v or not isinstance(v, str): continue
-            new_v = _replace_dates(v)
-            if new_v != v:
-                ws.cell(row=r, column=c).value = new_v
-    out = io.BytesIO(); wb.save(out); out.seek(0)
-    return out.getvalue()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  GIAO DIỆN CHÍNH
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="hero">
-  <div class="badge">🏥 Bệnh viện Đà Nẵng · Khoa Dược</div>
-  <h1>HỆ THỐNG TỰ ĐỘNG HÓA<br>BIÊN BẢN DƯỢC</h1>
-  <p class="sub">Biên Bản Kiểm (BBKN · BBKK) &nbsp;·&nbsp; Xuất Nhập Tồn (XNT) &nbsp;·&nbsp; Đối Chiếu Dược</p>
+_defaults = {
+    "room":           ROOMS[0],
+    "excel_preview":  None,
+    "excel_thang":    None,
+    "ky2":            "Tháng này",
+    "nam2":           date.today().year,
+    "edit_id":        None,
+    "form_ver":       0,
+    "coc_form_ver":   0,
+    "coc_live_tien":  "",
+    "nav_year":       date.today().year,
+    "nav_month":      date.today().month,
+    "live_tien_thu":  "",
+    "live_tien_chi":  "",
+    "selected_gd":    None,
+}
+for k, v in _defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+today = date.today()
+
+# ── HEADER ───────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div class="app-hdr">
+  <div class="app-hdr-icon">🏢</div>
+  <div>
+    <h1>Quản Lý Thu Chi Căn Hộ</h1>
+    <p>Google Sheets · 9 phòng · TT152/2025/TT-BTC</p>
+  </div>
+  <div class="app-hdr-right">
+    <div class="app-hdr-date">{today.strftime('%d/%m/%Y')}</div>
+    <div class="app-hdr-version">v4.2</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── 3 Tab chính ───────────────────────────────────────────────────────────────
-tab_bienban, tab_xnt_main, tab_dc = st.tabs([
-    "📋 Biên Bản Kiểm",
-    "📊 Báo Cáo XNT",
-    "🔍 Đối Chiếu Dược",
+ws_check = get_worksheet()
+if ws_check:
+    st.markdown('<div class="gs-badge">🟢 Google Sheets đã kết nối — Dữ liệu được lưu vĩnh viễn</div>', unsafe_allow_html=True)
+else:
+    st.warning("⚠️ Chưa kết nối Google Sheets. Hãy cấu hình `secrets.toml`.")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔍 Test Cấu Hình Phòng")
+phong_test = st.sidebar.selectbox("Chọn phòng để test data:", ROOMS, key="sb_phong_test")
+# Gọi hàm get_thong_tin_phong để lấy dữ liệu thực tế từ Google Sheets
+data_phong = get_thong_tin_phong(phong_test)
+st.sidebar.json(data_phong)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TABS
+# ══════════════════════════════════════════════════════════════════════════════
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "➕  Nhập Liệu",
+    "📤  Import & Thu Tiền",
+    "📒  Sổ Dòng Tiền",
+    "📊  Xuất Sổ Thuế",
+    "📌  Quản lý Tiền Cọc",
 ])
 
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 1 — NHẬP LIỆU NHANH
+# ════════════════════════════════════════════════════════════════════════════
+with tab1:
+    @st.fragment
+    def fragment_nhap_lieu():
+        df_all = load_all()
+        col_main, col_side = st.columns([5, 3], gap="large")
 
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 1 – BIÊN BẢN KIỂM (gộp BBKN + BBKK)                              ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-with tab_bienban:
-    st.markdown("""<div class="info-box">
-    Chọn loại biên bản cần xử lý. Mỗi biên bản có bộ chọn <b>Tháng / Năm</b> riêng —
-    hệ thống sẽ tự động điền tháng, năm và ngày cuối tháng vào đúng vị trí trong form.
-    </div>""", unsafe_allow_html=True)
+        with col_main:
+            st.markdown('<div class="section-heading"><span>➕</span> Thêm giao dịch mới</div>', unsafe_allow_html=True)
 
-    sub_bbkn, sub_bbkk = st.tabs([
-        "📥 Kiểm Nhập (BBKN)",
-        "🔎 Kiểm Kê (BBKK)",
-    ])
+            # ── Row 1: Loại + Ngày ───────────────────────────────────────────
+            r1a, r1b = st.columns([1, 2])
+            with r1a:
+                loai_sel = st.radio("Loại giao dịch", ["Thu", "Chi"], horizontal=True, key="loai_r")
+            with r1b:
+                ngay_sel = st.date_input("📅 Ngày giao dịch", value=today, key="ngay_i")
 
-    # ── SUB-TAB BBKN ──────────────────────────────────────────────────────────
-    with sub_bbkn:
-        st.markdown("""<div class="tab-desc">
-        Upload <b>file dữ liệu thô BBKN từ HPT</b> (.xls/.xlsx) và <b>file form chuẩn kiểm nhập</b>.<br>
-        Logic: Lọc bỏ dòng Số lượng nhập = 0 · Phân nhóm theo công ty · Tính thành tiền tự động.
-        </div>""", unsafe_allow_html=True)
+            if loai_sel == "Thu":
+                # ── Row 2: Chọn phòng ─────────────────────────────────────────
+                st.markdown('<div class="form-group-label">Chọn nhanh phòng</div>', unsafe_allow_html=True)
+                room_cols = st.columns(len(ROOMS))
+                for i, p in enumerate(ROOMS):
+                    with room_cols[i]:
+                        if st.button(p, key=f"rb_{p}", use_container_width=True,
+                                     type="primary" if st.session_state.room == p else "secondary"):
+                            st.session_state.room = p
+                            st.rerun(scope="fragment")
 
-        bbkn_ta, bbkn_tb = st.columns(2)
-        with bbkn_ta:
-            bbkn_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
-                format_func=lambda x: f"Tháng {x}", key="bbkn_thang")
-        with bbkn_tb:
-            bbkn_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
-                value=2026, key="bbkn_nam")
+                ma_phong_sel = st.session_state.room
+                st.markdown(f"<div style='font-size:.8rem;color:#1a7f5a;font-weight:600;margin:4px 0 10px'>📍 Đang chọn: <b>{ma_phong_sel}</b></div>", unsafe_allow_html=True)
 
-        col1, col2 = st.columns(2)
-        with col1: raw_file_bbkn = st.file_uploader("📂 File dữ liệu thô HPT (BBKN)", type=["xls","xlsx"], key="bbkn_raw")
-        with col2: tpl_file_bbkn = st.file_uploader("📄 File form chuẩn Kiểm Nhập", type=["xls","xlsx"], key="bbkn_tpl")
+                fv = st.session_state.form_ver
 
-        # Hiển thị trạng thái bảng lô/hạn dùng chung từ tab Đối chiếu
-        _shared_ma = st.session_state.get('shared_ma_map')
-        if _shared_ma is not None:
-            st.markdown(
-                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ tab Đối chiếu): '
-                f'{len(_shared_ma)} mã HPT — sẽ tự cập nhật Số lô + Hạn dùng khi xuất.</div>',
-                unsafe_allow_html=True)
-        else:
-            st.markdown(
-                '<div class="info-box">💡 Upload <b>Dữ liệu thô nhập tháng</b> trong tab <b>Đối Chiếu Dược</b> '
-                'để kích hoạt tự động cập nhật Số lô + Hạn dùng.</div>',
-                unsafe_allow_html=True)
-        st.markdown("<hr>", unsafe_allow_html=True)
+                # ── Row 3: Danh mục + Số tiền ─────────────────────────────────
+                r3a, r3b = st.columns([2, 3])
+                with r3b:
+                    so_tien_raw = st.text_input(
+                        "💰 Số tiền (₫)",
+                        placeholder="VD: 3.500.000",
+                        key=f"st_thu_{fv}",
+                        on_change=lambda: st.session_state.update(
+                            live_tien_thu=st.session_state.get(f"st_thu_{fv}", "")
+                        ),
+                    )
+                    so_tien = parse_tien(so_tien_raw)
+                    if so_tien > 0:
+                        st.markdown(f"<div style='color:#1a9e5f;font-weight:800;font-size:1.25rem;margin:-2px 0 4px'>{fmt_vnd(so_tien)}</div>", unsafe_allow_html=True)
 
-        ready_bbkn = raw_file_bbkn is not None and tpl_file_bbkn is not None
-        if st.button("⚡ Bắt đầu xử lý BBKN", disabled=not ready_bbkn, key="btn_bbkn"):
-            with st.spinner("Đang xử lý BBKN..."):
-                try:
-                    raw_b = raw_file_bbkn.read()
-                    if raw_file_bbkn.name.endswith('.xls'):
-                        try:    raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None,engine='xlrd')
-                        except: raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
+                # ── Row 4: Ghi chú + Submit (trong form) ──────────────────────
+                with st.form(key=f"form_thu_{fv}", clear_on_submit=True):
+                    with r3a:
+                        danh_muc_sel = st.selectbox("📂 Danh mục", DANH_MUC_THU, key="dm_thu")
+                    ghi_chu = st.text_input("📝 Ghi chú (tùy chọn)", placeholder="Tháng ..., nội dung ...", key=f"gc_thu_{fv}")
+                    submitted_thu = st.form_submit_button("💾  Lưu giao dịch Thu", type="primary", use_container_width=True)
+
+                if submitted_thu:
+                    so_tien_submit = parse_tien(st.session_state.get(f"st_thu_{fv}", ""))
+                    if so_tien_submit <= 0:
+                        st.error("⚠️ Nhập số tiền lớn hơn 0")
                     else:
-                        raw_df=pd.read_excel(io.BytesIO(raw_b),sheet_name=0,header=None)
-                    tpl_b = tpl_file_bbkn.read()
-                    # Nếu form chuẩn là .xls thì convert sang xlsx bytes
-                    if tpl_file_bbkn.name.endswith('.xls'):
-                        import xlrd, openpyxl as _oxl
-                        _xwb = xlrd.open_workbook(file_contents=tpl_b)
-                        _xws = _xwb.sheet_by_index(0)
-                        _nwb = _oxl.Workbook(); _nws = _nwb.active
-                        for _r in range(_xws.nrows):
-                            for _c in range(_xws.ncols):
-                                _nws.cell(row=_r+1,column=_c+1,value=_xws.cell_value(_r,_c))
-                        _tb=io.BytesIO(); _nwb.save(_tb); tpl_b=_tb.getvalue()
-                    # Cập nhật tháng/năm trong form trước khi build
-                    tpl_b = update_bbkn_dates(tpl_b, bbkn_thang, bbkn_nam)
-                    companies, stats = parse_companies(raw_df, 9)
-                    if not companies:
-                        st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
-                        st.stop()
-                    # Hướng 3: dùng bảng lô/hạn chung từ tab Đối chiếu
-                    ma_map_bbkn    = st.session_state.get('shared_ma_map')
-                    fuzzy_map_bbkn = st.session_state.get('shared_fuzzy_map')
-                    lot_map_info_bbkn = (
-                        f"✅ {len(ma_map_bbkn)} mã HPT · {len(fuzzy_map_bbkn)} fuzzy"
-                        if ma_map_bbkn else '')
-                    # Hướng 1: cảnh báo trước khi xuất
-                    exp_bbkn, near_bbkn = check_expiry_warnings(companies, mode='companies')
-                    result, debug_rows_bbkn = build_bbkn(tpl_b, companies, ma_map_bbkn, fuzzy_map_bbkn)
-                    st.session_state['bbkn_result']        = result
-                    st.session_state['bbkn_stats']         = stats
-                    st.session_state['bbkn_done']          = True
-                    st.session_state['bbkn_thang_val']     = bbkn_thang
-                    st.session_state['bbkn_nam_val']       = bbkn_nam
-                    st.session_state['bbkn_debug_rows']    = debug_rows_bbkn
-                    st.session_state['bbkn_exp']           = exp_bbkn
-                    st.session_state['bbkn_near']          = near_bbkn
-                    st.session_state['bbkn_lot_map_info']  = lot_map_info_bbkn
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
+                        ok = insert_gd(ngay_sel, "Thu", ma_phong_sel, danh_muc_sel, so_tien_submit, ghi_chu, trang_thai="Đã thu")
+                        if ok:
+                            st.toast(f"✅ Đã lưu: {danh_muc_sel} · {ma_phong_sel} · {fmt_vnd(so_tien_submit)}", icon="💚")
+                            st.session_state.live_tien_thu = ""
+                            st.session_state.form_ver += 1
+                            st.rerun(scope="fragment")
 
-        if st.session_state.get("bbkn_done"):
-            stats  = st.session_state["bbkn_stats"]
-            result = st.session_state["bbkn_result"]
-            _t = st.session_state.get("bbkn_thang_val", bbkn_thang)
-            _n = st.session_state.get("bbkn_nam_val",   bbkn_nam)
-            fname  = f"BBKN_T{_t}_{_n}_HoanChinh.xlsx"
-            # Hướng 1: hiển thị cảnh báo hạn dùng
-            show_expiry_warnings(
-                st.session_state.get('bbkn_exp', []),
-                st.session_state.get('bbkn_near', []),
-                label=f'BBKN T{_t}/{_n}')
-            lmi = st.session_state.get('bbkn_lot_map_info', '')
-            if lmi:
-                st.markdown(f'<div class="map-box">🔄 <b>Cập nhật lô/hạn:</b> {lmi}</div>',
-                            unsafe_allow_html=True)
-            st.markdown(f"""
-            <div class="ok-box">
-              <div class="icon">✅</div>
-              <h3>Xử lý BBKN hoàn tất – Tháng {_t}/{_n}!</h3>
-              <p>File sẵn sàng — tải về và in ký hội đồng.</p>
-            </div>
-            <div class="stat-grid">
-              <div class="stat-card"><div class="num">{stats['companies']}</div><div class="lbl">Công ty cung cấp</div></div>
-              <div class="stat-card"><div class="num">{stats['drugs']}</div><div class="lbl">Mặt hàng có nhập</div></div>
-              <div class="stat-card"><div class="num">{stats['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
-            </div>""", unsafe_allow_html=True)
-            st.download_button(label=f"⬇️ Tải File BBKN – {fname}", data=result, file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkn")
-            sw = stats.get('shift_warnings', [])
-            if sw:
-                st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(sw)} dòng lệch cột trong file HPT – đã tự căn chỉnh:</b><br>
-                {'<br>'.join(f'• {w}' for w in sw)}<br><br>
-                <b>Vui lòng kiểm tra lại các dòng này trong file xuất ra.</b>
-                </div>""", unsafe_allow_html=True)
-            dbg = st.session_state.get('bbkn_debug_rows', [])
-            if dbg:
-                st.markdown(f"""<div class="warn-box">⚠️ <b>Phát hiện {len(dbg)} dòng thiếu SL nhập (cột 9 trống) trong file HPT:</b><br>
-                {'<br>'.join(f'• <b>{d["ten"]}</b> {d["nd"]} — dữ liệu thô: {", ".join(d["sl_raw"])}' for d in dbg)}<br><br>
-                <b>Kiểm tra lại HPT: các dòng này có thể bị lệch cột hoặc HPT không xuất SL nhập.</b>
-                </div>""", unsafe_allow_html=True)
-            st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Ngang · Fit All Columns on One Page</b>.
-            Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
+            else:
+                # ── Chi nhanh ─────────────────────────────────────────────────
+                st.markdown('<div class="chi-notice">⚡ Chế độ Chi nhanh — Nhập <b>Số tiền</b> &amp; <b>Ghi chú</b> rồi Lưu!</div>', unsafe_allow_html=True)
 
-    # ── SUB-TAB BBKK ──────────────────────────────────────────────────────────
-    with sub_bbkk:
-        st.markdown("""<div class="tab-desc">
-        Upload <b>file dữ liệu thô BBKK từ HPT</b> (.xlsx) và <b>file form chuẩn kiểm kê</b>.<br>
-        Logic: Lọc bỏ dòng Số lượng thực tế = 0 · Điền đủ tên, lô, hạn dùng, SL sổ sách & thực tế.
-        </div>""", unsafe_allow_html=True)
+                fv = st.session_state.form_ver
 
-        bbkk_ta, bbkk_tb = st.columns(2)
-        with bbkk_ta:
-            bbkk_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
-                format_func=lambda x: f"Tháng {x}", key="bbkk_thang")
-        with bbkk_tb:
-            bbkk_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
-                value=2026, key="bbkk_nam")
+                # ── Row 2: Danh mục + Số tiền ─────────────────────────────────
+                r2a, r2b = st.columns([2, 3])
+                with r2b:
+                    so_tien_chi_raw = st.text_input(
+                        "💰 Số tiền (₫)",
+                        placeholder="VD: 700.000",
+                        key=f"st_chi_{fv}",
+                        on_change=lambda: st.session_state.update(
+                            live_tien_chi=st.session_state.get(f"st_chi_{fv}", "")
+                        ),
+                    )
+                    so_tien_chi = parse_tien(so_tien_chi_raw)
+                    if so_tien_chi > 0:
+                        st.markdown(f"<div style='color:#e05252;font-weight:800;font-size:1.25rem;margin:-2px 0 4px'>{fmt_vnd(so_tien_chi)}</div>", unsafe_allow_html=True)
 
-        col1k, col2k = st.columns(2)
-        with col1k: raw_file_bbkk = st.file_uploader("📂 File dữ liệu thô HPT (BBKK)", type=["xls","xlsx"], key="bbkk_raw")
-        with col2k: tpl_file_bbkk = st.file_uploader("📄 File form chuẩn Kiểm Kê", type=["xls","xlsx"], key="bbkk_tpl")
+                with st.form(key=f"form_chi_{fv}", clear_on_submit=True):
+                    with r2a:
+                        dm_chi = st.selectbox("📂 Danh mục chi", DANH_MUC_CHI, index=0, key="dm_chi")
+                    gc_chi = st.text_input("📝 Ghi chú — Mua / chi gì?", key=f"gc_chi_{fv}")
+                    submitted_chi = st.form_submit_button("💾  Lưu khoản Chi", type="primary", use_container_width=True)
 
-        _shared_ma_kk = st.session_state.get('shared_ma_map')
-        if _shared_ma_kk is not None:
-            st.markdown(
-                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ tab Đối chiếu): '
-                f'{len(_shared_ma_kk)} mã HPT — sẽ tự cập nhật Số lô + Hạn dùng khi xuất.</div>',
-                unsafe_allow_html=True)
-        else:
-            st.markdown(
-                '<div class="info-box">💡 Upload <b>Dữ liệu thô nhập tháng</b> trong tab <b>Đối Chiếu Dược</b> '
-                'để kích hoạt tự động cập nhật Số lô + Hạn dùng.</div>',
-                unsafe_allow_html=True)
-        st.markdown("<hr>", unsafe_allow_html=True)
-
-        ready_bbkk = raw_file_bbkk is not None and tpl_file_bbkk is not None
-        if st.button("⚡ Bắt đầu xử lý BBKK", disabled=not ready_bbkk, key="btn_bbkk"):
-            with st.spinner("Đang xử lý BBKK..."):
-                try:
-                    raw_b_kk = raw_file_bbkk.read()
-                    if raw_file_bbkk.name.endswith('.xls'):
-                        try:    raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None,engine='xlrd')
-                        except: raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
+                if submitted_chi:
+                    so_tien_chi_submit = parse_tien(st.session_state.get(f"st_chi_{fv}", ""))
+                    if so_tien_chi_submit <= 0:
+                        st.error("⚠️ Nhập số tiền lớn hơn 0")
                     else:
-                        raw_df_kk=pd.read_excel(io.BytesIO(raw_b_kk),sheet_name=0,header=None)
-                    tpl_b_kk = tpl_file_bbkk.read()
-                    if tpl_file_bbkk.name.endswith('.xls'):
-                        import xlrd, openpyxl as _oxl2
-                        _xwb2 = xlrd.open_workbook(file_contents=tpl_b_kk)
-                        _xws2 = _xwb2.sheet_by_index(0)
-                        _nwb2 = _oxl2.Workbook(); _nws2 = _nwb2.active
-                        for _r2 in range(_xws2.nrows):
-                            for _c2 in range(_xws2.ncols):
-                                _nws2.cell(row=_r2+1,column=_c2+1,value=_xws2.cell_value(_r2,_c2))
-                        _tb2=io.BytesIO(); _nwb2.save(_tb2); tpl_b_kk=_tb2.getvalue()
-                    drugs_kk, stats_kk = parse_bbkk_raw(raw_df_kk)
-                    if not drugs_kk:
-                        st.error("❌ Không tìm thấy dữ liệu hợp lệ. Kiểm tra lại file HPT.")
-                        st.stop()
-                    # Hướng 3: dùng bảng lô/hạn chung từ tab Đối chiếu
-                    ma_map_kk    = st.session_state.get('shared_ma_map')
-                    fuzzy_map_kk = st.session_state.get('shared_fuzzy_map')
-                    lot_map_info_kk = (
-                        f"✅ {len(ma_map_kk)} mã HPT · {len(fuzzy_map_kk)} fuzzy"
-                        if ma_map_kk else '')
-                    # Hướng 1: cảnh báo trước khi xuất
-                    exp_kk, near_kk = check_expiry_warnings(drugs_kk, mode='drugs')
-                    result_kk = build_bbkk(tpl_b_kk, drugs_kk, bbkk_thang, bbkk_nam, ma_map_kk, fuzzy_map_kk)
-                    st.session_state['bbkk_result']        = result_kk
-                    st.session_state['bbkk_stats']         = stats_kk
-                    st.session_state['bbkk_done']          = True
-                    st.session_state['bbkk_thang_val']     = bbkk_thang
-                    st.session_state['bbkk_nam_val']       = bbkk_nam
-                    st.session_state['bbkk_exp']           = exp_kk
-                    st.session_state['bbkk_near']          = near_kk
-                    st.session_state['bbkk_lot_map_info']  = lot_map_info_kk
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
+                        ok = insert_gd(ngay_sel, "Chi", "Chung", dm_chi, so_tien_chi_submit, gc_chi, trang_thai="Đã thu")
+                        if ok:
+                            st.toast(f"✅ Đã lưu: {dm_chi} · {fmt_vnd(so_tien_chi_submit)}", icon="🔴")
+                            st.session_state.live_tien_chi = ""
+                            st.session_state.form_ver += 1
+                            st.rerun(scope="fragment")
 
-        if st.session_state.get("bbkk_done"):
-            stats_kk2  = st.session_state["bbkk_stats"]
-            result_kk2 = st.session_state["bbkk_result"]
-            _tk = st.session_state.get("bbkk_thang_val", bbkk_thang)
-            _nk = st.session_state.get("bbkk_nam_val",   bbkk_nam)
-            fname_kk = f"BBKK_T{_tk}_{_nk}_HoanChinh.xlsx"
-            # Hướng 1: cảnh báo hạn dùng
-            show_expiry_warnings(
-                st.session_state.get('bbkk_exp', []),
-                st.session_state.get('bbkk_near', []),
-                label=f'BBKK T{_tk}/{_nk}')
-            lmi_kk = st.session_state.get('bbkk_lot_map_info', '')
-            if lmi_kk:
-                st.markdown(f'<div class="map-box">🔄 <b>Cập nhật lô/hạn:</b> {lmi_kk}</div>',
-                            unsafe_allow_html=True)
+        # ── Side Panel: Dashboard Cards ───────────────────────────────────────
+        with col_side:
+            sd_dau, t_thu, t_chi, sd_cuoi = compute_balances(
+                df_all,
+                date(today.year, today.month, 1),
+                today
+            )
+
+            # Pending badge
+            df_cho_side = df_all[df_all["trang_thai"] == "Chờ thanh toán"] if not df_all.empty else pd.DataFrame()
+            if not df_cho_side.empty:
+                tong_cho_side = df_cho_side["so_tien"].sum()
+                st.markdown(f"""
+                <div class="pending-badge">
+                    ⏳ Chờ thanh toán: <b>{fmt_vnd(tong_cho_side)}</b>
+                    &nbsp;·&nbsp; {len(df_cho_side)} GD
+                </div>
+                """, unsafe_allow_html=True)
+
+            # 3 Dashboard Cards
             st.markdown(f"""
-            <div class="ok-box">
-              <div class="icon">✅</div>
-              <h3>Xử lý BBKK hoàn tất – Tháng {_tk}/{_nk}!</h3>
-              <p>File sẵn sàng — tải về, in và ký hội đồng kiểm kê.</p>
+            <div class="dash-card dash-card-thu" style="margin-bottom:10px">
+                <div class="dash-card-icon">📈</div>
+                <div class="dash-card-label">Tổng Thu Thực Tế</div>
+                <div class="dash-card-amount">+{fmt_vnd(t_thu)}</div>
+                <div class="dash-card-sub">Tháng {today.month:02d}/{today.year}</div>
             </div>
-            <div class="stat-grid">
-              <div class="stat-card"><div class="num">{stats_kk2['drugs']}</div><div class="lbl">Mặt hàng có tồn</div></div>
-              <div class="stat-card"><div class="num">{stats_kk2['skipped']}</div><div class="lbl">Dòng SL=0 đã lọc</div></div>
-            </div>""", unsafe_allow_html=True)
-            st.download_button(label=f"⬇️ Tải File BBKK – {fname_kk}", data=result_kk2, file_name=fname_kk,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_bbkk")
-            st.markdown("""<div class="note">💡 <b>Khi in:</b> File đã thiết lập sẵn <b>A4 Đứng</b>.
-            Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
+            <div class="dash-card dash-card-chi" style="margin-bottom:10px">
+                <div class="dash-card-icon">📉</div>
+                <div class="dash-card-label">Tổng Chi Thực Tế</div>
+                <div class="dash-card-amount">-{fmt_vnd(t_chi)}</div>
+                <div class="dash-card-sub">Tháng {today.month:02d}/{today.year}</div>
+            </div>
+            <div class="dash-card dash-card-ton" style="margin-bottom:14px">
+                <div class="dash-card-icon" style="opacity:.2">🏦</div>
+                <div class="dash-card-label">Tồn Quỹ Hiện Tại</div>
+                <div class="dash-card-amount">{fmt_vnd(sd_cuoi)}</div>
+                <div class="dash-card-sub">Số dư đầu kỳ: {fmt_vnd(sd_dau)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Recent transactions
+            st.markdown("<div style='font-size:.72rem;font-weight:700;color:#bbb;letter-spacing:.5px;margin-bottom:8px'>GẦN ĐÂY (đã thu)</div>", unsafe_allow_html=True)
+            df_recent = df_all[df_all["trang_thai"].isin(TRANG_THAI_DA_THU)] if not df_all.empty else pd.DataFrame()
+            if not df_recent.empty:
+                for _, r in df_recent.head(6).iterrows():
+                    icon = "📈" if r["loai"] == "Thu" else "📉"
+                    cls  = "thu" if r["loai"] == "Thu" else "chi"
+                    pref = "+" if r["loai"] == "Thu" else "-"
+                    note = f" · {r['ghi_chu']}" if str(r.get("ghi_chu", "")).strip() else ""
+                    st.markdown(f"""
+                    <div class="tx">
+                        <div class="ti {cls}">{icon}</div>
+                        <div class="tn">
+                            <div class="tc">{r['danh_muc']}</div>
+                            <div class="tm">{r['ma_phong']}{note} · {r['ngay'].strftime('%d/%m')}</div>
+                        </div>
+                        <div class="ta {cls}">{pref}{fmt_vnd(r['so_tien'])}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("Chưa có giao dịch thực thu.")
+
+    fragment_nhap_lieu()
 
 
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 2 – XNT                                                            ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-with tab_xnt_main:
-    st.markdown("""<div class="tab-desc">
-    Upload <b>file dữ liệu thô XNT từ HPT</b> (.xlsx) và <b>file BBXNT form chuẩn</b>.<br>
-    Logic: Giữ dòng có Tồn cuối ≠ 0 · Phân nhóm theo công ty · Thành tiền = Đơn giá × Tồn cuối.
-    </div>""", unsafe_allow_html=True)
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — IMPORT EXCEL + CHỐT SỐ + XÁC NHẬN THU TIỀN
+# ════════════════════════════════════════════════════════════════════════════
+with tab2:
 
-    xnt_ta, xnt_tb = st.columns(2)
-    with xnt_ta:
-        xnt_thang = st.selectbox("📅 Tháng báo cáo", range(1, 13), index=2,
-            format_func=lambda x: f"Tháng {x}", key="xnt_thang")
-    with xnt_tb:
-        xnt_nam = st.number_input("📅 Năm", min_value=2024, max_value=2030,
-            value=2026, key="xnt_nam")
-
-    col1x, col2x = st.columns(2)
-    with col1x: raw_file_xnt = st.file_uploader("📂 File dữ liệu thô HPT (XNT)", type=["xls","xlsx"], key="xnt_raw")
-    with col2x: tpl_file_xnt = st.file_uploader("📄 File form chuẩn XNT", type=["xls","xlsx"], key="xnt_tpl")
-
-    _shared_ma_xnt = st.session_state.get('shared_ma_map')
-    if _shared_ma_xnt is not None:
-        st.markdown(
-            f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ tab Đối chiếu): '
-            f'{len(_shared_ma_xnt)} mã HPT — sẽ tự cập nhật Số lô + Hạn dùng khi xuất.</div>',
-            unsafe_allow_html=True)
-    else:
-        st.markdown(
-            '<div class="info-box">💡 Upload <b>Dữ liệu thô nhập tháng</b> trong tab <b>Đối Chiếu Dược</b> '
-            'để kích hoạt tự động cập nhật Số lô + Hạn dùng.</div>',
-            unsafe_allow_html=True)
-    st.markdown("<hr>", unsafe_allow_html=True)
-
-    ready_xnt_main = raw_file_xnt is not None and tpl_file_xnt is not None
-    if st.button("⚡ Bắt đầu xử lý XNT", disabled=not ready_xnt_main, key="btn_xnt_main"):
-        with st.spinner("Đang xử lý XNT..."):
-            try:
-                raw_b_xnt = raw_file_xnt.read()
-                if raw_file_xnt.name.endswith('.xls'):
-                    try:    raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None,engine='xlrd')
-                    except: raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None)
-                else:
-                    raw_df2=pd.read_excel(io.BytesIO(raw_b_xnt),sheet_name=0,header=None)
-                tpl_b2  = tpl_file_xnt.read()
-                if tpl_file_xnt.name.endswith('.xls'):
-                    import xlrd, openpyxl
-                    xls_wb = xlrd.open_workbook(file_contents=tpl_b2)
-                    xls_ws = xls_wb.sheet_by_index(0)
-                    new_wb = openpyxl.Workbook()
-                    new_ws = new_wb.active
-                    for r in range(xls_ws.nrows):
-                        for c in range(xls_ws.ncols):
-                            new_ws.cell(row=r+1, column=c+1, value=xls_ws.cell_value(r,c))
-                    tmp_buf = io.BytesIO(); new_wb.save(tmp_buf); tpl_b2 = tmp_buf.getvalue()
-                tpl_b2 = update_xnt_dates(tpl_b2, xnt_thang, xnt_nam)
-                companies2, stats2 = parse_companies(raw_df2, 12)
-                if not companies2:
-                    st.error("❌ Không tìm thấy dữ liệu hợp lệ."); st.stop()
-                # Hướng 3: dùng bảng lô/hạn chung từ tab Đối chiếu
-                ma_map_xnt    = st.session_state.get('shared_ma_map')
-                fuzzy_map_xnt = st.session_state.get('shared_fuzzy_map')
-                lot_map_info_xnt = (
-                    f"✅ {len(ma_map_xnt)} mã HPT · {len(fuzzy_map_xnt)} fuzzy"
-                    if ma_map_xnt else '')
-                # Hướng 1: cảnh báo trước khi xuất
-                exp_xnt, near_xnt = check_expiry_warnings(companies2, mode='companies')
-                result2 = build_xnt(tpl_b2, companies2, ma_map_xnt, fuzzy_map_xnt)
-                st.session_state['xnt_main_result']       = result2
-                st.session_state['xnt_main_stats']        = stats2
-                st.session_state['xnt_main_done']         = True
-                st.session_state['xnt_main_thang_val']    = xnt_thang
-                st.session_state['xnt_main_nam_val']      = xnt_nam
-                st.session_state['xnt_main_exp']          = exp_xnt
-                st.session_state['xnt_main_near']         = near_xnt
-                st.session_state['xnt_main_lot_map_info'] = lot_map_info_xnt
-            except Exception as e:
-                st.error(f"❌ Lỗi: {e}"); st.exception(e)
-
-    if st.session_state.get("xnt_main_done"):
-        stats2  = st.session_state["xnt_main_stats"]
-        result2 = st.session_state["xnt_main_result"]
-        _tx = st.session_state.get("xnt_main_thang_val", xnt_thang)
-        _nx = st.session_state.get("xnt_main_nam_val",   xnt_nam)
-        fname2  = f"XNT_T{_tx}_{_nx}_HoanChinh.xlsx"
-        # Hướng 1: cảnh báo hạn dùng
-        show_expiry_warnings(
-            st.session_state.get('xnt_main_exp', []),
-            st.session_state.get('xnt_main_near', []),
-            label=f'XNT T{_tx}/{_nx}')
-        lmi_xnt = st.session_state.get('xnt_main_lot_map_info', '')
-        if lmi_xnt:
-            st.markdown(f'<div class="map-box">🔄 <b>Cập nhật lô/hạn:</b> {lmi_xnt}</div>',
-                        unsafe_allow_html=True)
-        st.markdown(f"""
-        <div class="ok-box">
-          <div class="icon">✅</div>
-          <h3>Xử lý XNT hoàn tất – Tháng {_tx}/{_nx}!</h3>
-          <p>File sẵn sàng — tải về và kiểm tra.</p>
+    # ── Fragment 2: Import Excel ──────────────────────────────────────────────
+    @st.fragment
+    def fragment_import_excel():
+        st.markdown('<div class="section-heading"><span>📤</span> Import báo cáo tháng từ file Excel</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="import-box">
+            <b>📋 Hướng dẫn:</b><br>
+            1. Upload file Excel báo cáo tháng (sheet <b>'3. QL hóa đơn'</b>)<br>
+            2. App tự đọc header dòng 2, bóc tách 9 phòng<br>
+            3. Kiểm tra bảng xem trước → Bấm <b>"Xác nhận & Chốt số"</b><br>
+            ⚠️ Dữ liệu sẽ lưu trạng thái <b>Chờ thanh toán</b> — chưa tính vào dòng tiền thực tế
         </div>
-        <div class="stat-grid">
-          <div class="stat-card"><div class="num">{stats2['companies']}</div><div class="lbl">Công ty cung cấp</div></div>
-          <div class="stat-card"><div class="num">{stats2['drugs']}</div><div class="lbl">Mặt hàng phát sinh</div></div>
-          <div class="stat-card"><div class="num">{stats2['skipped']}</div><div class="lbl">Dòng tồn cuối=0 đã lọc</div></div>
-        </div>""", unsafe_allow_html=True)
-        st.download_button(label=f"⬇️ Tải File XNT – {fname2}", data=result2, file_name=fname2,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_xnt_main")
-        st.markdown("""<div class="note">💡 <b>Khi in:</b> A4 Ngang · Fit All Columns on One Page.
-        Mở Excel → Ctrl+P → in ngay.</div>""", unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+
+        ic1, ic2, ic3 = st.columns([3, 1, 1])
+        with ic1:
+            uploaded = st.file_uploader("📂 Chọn file Excel (.xlsx)", type=["xlsx"], key="xl_upload")
+        with ic2:
+            thang_imp = st.selectbox("Tháng", list(range(1, 13)),
+                                     index=today.month - 1,
+                                     format_func=lambda x: f"T{x:02d}", key="th_imp")
+        with ic3:
+            nam_imp = st.selectbox("Năm", list(range(2023, today.year + 2)),
+                                   index=list(range(2023, today.year + 2)).index(today.year), key="nm_imp")
+
+        if uploaded:
+            with st.spinner("Đang đọc và phân tích file Excel..."):
+                df_preview = parse_excel_invoice(uploaded, thang_imp, nam_imp)
+
+            if df_preview is not None:
+                st.session_state.excel_preview = df_preview
+                st.session_state.excel_thang   = (thang_imp, nam_imp)
+
+                st.markdown(f'<div class="section-heading"><span>🔍</span> Xem trước — Tháng {thang_imp:02d}/{nam_imp}</div>', unsafe_allow_html=True)
+                st.markdown(f"Tìm thấy **{len(df_preview)} phòng**. Kiểm tra số liệu trước khi chốt:")
+
+                show_df = df_preview.copy()
+                rename_map = {
+                    "ma_phong": "Phòng", "ten_kh": "Tên KH/ĐD",
+                    "tien_phong": "Tiền nhà (₫)", "so_dien_kwh": "kWh",
+                    "tien_dien": "Tiền điện (₫)", "tien_nuoc": "Tiền nước (₫)",
+                    "tong_phai_thu": "Tổng phải thu (₫)", "thang_nhap": "Tháng",
+                    "trang_thai": "Trạng thái",
+                }
+                show_df = show_df.rename(columns={k: v for k, v in rename_map.items() if k in show_df.columns})
+
+                # Build column_config for st.dataframe
+                col_cfg = {}
+                for money_col in ["Tiền nhà (₫)", "Tiền điện (₫)", "Tiền nước (₫)", "Tổng phải thu (₫)"]:
+                    if money_col in show_df.columns:
+                        col_cfg[money_col] = st.column_config.NumberColumn(
+                            money_col, format="%,.0f ₫", min_value=0
+                        )
+                if "Trạng thái" in show_df.columns:
+                    col_cfg["Trạng thái"] = st.column_config.SelectboxColumn(
+                        "Trạng thái",
+                        options=["Chờ thanh toán", "Đã thanh toán", "Đã thu"],
+                        disabled=True,
+                    )
+
+                st.dataframe(show_df, use_container_width=True, hide_index=True, column_config=col_cfg)
+
+                if "tong_phai_thu" in df_preview.columns:
+                    tong_kt = df_preview["tong_phai_thu"].sum()
+                    st.markdown(f"""
+                    <div style="background:#e8f5f0;border-radius:12px;padding:13px 18px;margin:10px 0;
+                                display:flex;gap:24px;align-items:center;border:1px solid #b8e6d0;">
+                        <div style="font-size:.88rem;color:#1a7f5a;font-weight:700">
+                            ✅ Tổng phải thu {len(df_preview)} phòng:
+                            <span style="font-size:1.2rem;font-weight:800"> {fmt_vnd(tong_kt)}</span>
+                        </div>
+                        <div style="font-size:.78rem;color:#8a6000;font-weight:500">
+                            ⚠️ Trạng thái: <b>Chờ thanh toán</b>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                st.markdown("---")
+                col_btn1, col_btn2 = st.columns([2, 1])
+                with col_btn1:
+                    if st.button("🚀  Xác nhận & Chốt số vào Google Sheets", key="push_gs", type="primary"):
+                        thang_m, nam_m = st.session_state.excel_thang
+                        ngay_base = date(nam_m, thang_m, 1)
+                        rows_to_push = []
+                        df_p = st.session_state.excel_preview
+                        thang_str = f"{thang_m:02d}/{nam_m}"
+
+                        for _, row in df_p.iterrows():
+                            ma_p = row.get("ma_phong", "Chung")
+                            if row.get("tien_phong", 0) > 0:
+                                rows_to_push.append([
+                                    str(ngay_base), "Thu", ma_p, "Doanh thu tiền phòng",
+                                    float(row["tien_phong"]), f"Import T{thang_m:02d}/{nam_m}",
+                                    thang_str, "Chờ thanh toán"
+                                ])
+                            if row.get("tien_dien", 0) > 0:
+                                kwh = row.get("so_dien_kwh", 0)
+                                rows_to_push.append([
+                                    str(ngay_base), "Thu", ma_p, "Thu hộ tiền điện",
+                                    float(row["tien_dien"]),
+                                    f"Điện {int(kwh)} kWh — Import T{thang_m:02d}/{nam_m}",
+                                    thang_str, "Chờ thanh toán"
+                                ])
+                            if row.get("tien_nuoc", 0) > 0:
+                                rows_to_push.append([
+                                    str(ngay_base), "Thu", ma_p, "Thu hộ tiền nước",
+                                    float(row["tien_nuoc"]),
+                                    f"Nước — Import T{thang_m:02d}/{nam_m}",
+                                    thang_str, "Chờ thanh toán"
+                                ])
+
+                        with st.spinner(f"Đang ghi {len(rows_to_push)} dòng vào Google Sheets..."):
+                            ok = append_batch(rows_to_push)
+
+                        if ok:
+                            st.toast(f"✅ Đã chốt {len(rows_to_push)} GD tháng {thang_m:02d}/{nam_m}", icon="📊")
+                            st.success(f"Chốt số thành công · Trạng thái: **Chờ thanh toán**\n\n👇 Kéo xuống mục **Xác nhận Thu Tiền** để tích phòng đã đóng tiền.")
+                            st.balloons()
+                            st.session_state.excel_preview = None
+                            st.rerun(scope="fragment")
+                        else:
+                            st.error("❌ Lỗi khi ghi vào Google Sheets.")
+
+                with col_btn2:
+                    if st.button("🗑️  Huỷ, upload lại", key="cancel_imp"):
+                        st.session_state.excel_preview = None
+                        st.rerun(scope="fragment")
+
+    fragment_import_excel()
+
+    st.markdown("---")
+
+    # ── Fragment 3: Xác nhận thu tiền ────────────────────────────────────────
+    @st.fragment
+    def fragment_xac_nhan_thu_tien():
+        st.markdown('<div class="section-heading"><span>💰</span> Xác Nhận Thu Tiền Thực Tế</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="cho-tt-box">
+            <div class="cho-tt-title">📋 Danh sách phòng đang Chờ thanh toán</div>
+            Tích chọn những phòng đã thực sự đóng tiền → Bấm <b>"Xác nhận đã thu tiền"</b>
+            để chuyển sang <b>Đã thanh toán</b> và ghi nhận vào dòng tiền thực tế.
+        </div>
+        """, unsafe_allow_html=True)
+
+        df_all = load_all()
+
+        df_cho = df_all[
+            (df_all["trang_thai"] == "Chờ thanh toán") &
+            (df_all["loai"] == "Thu")
+        ].copy()
+
+        if df_cho.empty:
+            st.info("✅ Không có phòng nào đang chờ thanh toán.")
+            return
+
+        thangs = df_cho["thang_nhap"].dropna().unique().tolist()
+        thangs.sort(reverse=True)
+
+        thang_sel = st.selectbox(
+            "🗓️ Chọn tháng cần xác nhận",
+            thangs,
+            format_func=lambda x: f"Tháng {x}",
+            key="thang_sel_tt"
+        )
+
+        df_thang = df_cho[df_cho["thang_nhap"] == thang_sel].copy()
+
+        summary = (
+            df_thang.groupby("ma_phong")
+            .agg(
+                tong_phai_thu=("so_tien", "sum"),
+                so_hang=("id", "count"),
+                ids=("id", lambda x: list(x.astype(int))),
+            )
+            .reset_index()
+        )
+
+        st.markdown(f"**{len(summary)} phòng** đang chờ thanh toán tháng **{thang_sel}** — Tổng: **{fmt_vnd(summary['tong_phai_thu'].sum())}**")
+
+        with st.expander("🗑️ Xóa dữ liệu tháng này (import nhầm?)", expanded=False):
+            st.warning(f"⚠️ Sẽ xóa toàn bộ **{len(df_thang)} dòng** — tháng **{thang_sel}** · Không thể hoàn tác!")
+            all_ids_thang = df_thang["id"].astype(int).tolist()
+            if st.button(f"🗑️ Xóa toàn bộ {len(df_thang)} dòng tháng {thang_sel}", key="del_thang_cho"):
+                with st.spinner("Đang xóa..."):
+                    ok = delete_batch(all_ids_thang)
+                if ok:
+                    st.toast(f"🗑️ Đã xóa {len(all_ids_thang)} dòng tháng {thang_sel}", icon="🗑️")
+                    st.rerun(scope="fragment")
+                else:
+                    st.error("❌ Lỗi xóa. Kiểm tra kết nối.")
+
+        st.markdown("---")
+
+        selected_ids = []
+        cols_check = st.columns(3)
+        for i, row in summary.iterrows():
+            with cols_check[i % 3]:
+                checked = st.checkbox(
+                    f"**{row['ma_phong']}** — {fmt_vnd(row['tong_phai_thu'])}",
+                    key=f"chk_{row['ma_phong']}_{thang_sel}",
+                    help=f"{row['so_hang']} dòng giao dịch"
+                )
+                if checked:
+                    selected_ids.extend(row["ids"])
+
+        if selected_ids:
+            n_phong_sel = len([r for _, r in summary.iterrows() if any(gid in selected_ids for gid in r["ids"])])
+            tong_sel = summary[summary["ids"].apply(lambda ids: any(gid in selected_ids for gid in ids))]["tong_phai_thu"].sum()
+            st.markdown(f"""
+            <div style="background:#e8f5f0;border-radius:11px;padding:12px 18px;margin:10px 0;
+                        font-size:.9rem;color:#1a7f5a;font-weight:600;border:1px solid #b8e6d0;">
+                ✅ Đã chọn <b>{n_phong_sel} phòng</b> · Tổng thu: <b>{fmt_vnd(tong_sel)}</b>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("✅  Xác nhận đã thu tiền — Ghi nhận dòng tiền thực tế",
+                         key="btn_xn_thu", type="primary"):
+                with st.spinner("Đang cập nhật trạng thái lên Google Sheets..."):
+                    ok = update_trang_thai(selected_ids, "Đã thanh toán")
+                if ok:
+                    st.toast(f"🎉 Xác nhận {n_phong_sel} phòng · {fmt_vnd(tong_sel)}", icon="✅")
+                    st.rerun(scope="fragment")
+                else:
+                    st.error("❌ Lỗi cập nhật. Kiểm tra kết nối Google Sheets.")
+        else:
+            st.caption("👆 Tích chọn ít nhất 1 phòng để xác nhận.")
+
+        df_da_tt = df_all[
+            (df_all["trang_thai"] == "Đã thanh toán") &
+            (df_all["loai"] == "Thu")
+        ]
+        if not df_da_tt.empty:
+            with st.expander(f"📋 Xem giao dịch đã thanh toán ({len(df_da_tt)} dòng)", expanded=False):
+                show = df_da_tt[["ngay", "ma_phong", "danh_muc", "so_tien", "thang_nhap"]].copy()
+                col_cfg_da = {
+                    "ngay":      st.column_config.DateColumn("Ngày", format="DD/MM/YYYY"),
+                    "so_tien":   st.column_config.NumberColumn("Số tiền (₫)", format="%,.0f ₫"),
+                    "ma_phong":  st.column_config.TextColumn("Phòng"),
+                    "danh_muc":  st.column_config.TextColumn("Danh mục"),
+                    "thang_nhap": st.column_config.TextColumn("Tháng"),
+                }
+                st.dataframe(show, use_container_width=True, hide_index=True, column_config=col_cfg_da)
+
+    fragment_xac_nhan_thu_tien()
 
 
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 3 – ĐỐI CHIẾU DƯỢC                                                ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-with tab_dc:
-    st.markdown("""<div class="info-box">
-    Module đối chiếu số liệu HPT vs Thống kê. Upload file 1 lần, dùng cho cả 3 loại đối chiếu:
-    <b>XNT · Kiểm nhập · Kiểm kê</b>.
-    </div>""", unsafe_allow_html=True)
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3 — SỔ DÒNG TIỀN
+# ════════════════════════════════════════════════════════════════════════════
+with tab3:
+    df_all2 = load_all()
+    df_real2 = df_all2[df_all2["trang_thai"].isin(TRANG_THAI_DA_THU)].copy() if not df_all2.empty else df_all2.copy()
 
-    # Tháng / Năm
-    dca, dcb = st.columns(2)
-    with dca: dc_thang = st.selectbox("Tháng báo cáo", range(1,13), index=2, format_func=lambda x: f"Tháng {x}", key="dc_thang")
-    with dcb: dc_nam   = st.number_input("Năm", min_value=2024, max_value=2030, value=2026, key="dc_nam")
-    dc_tn = f"T{dc_thang}/{dc_nam}"
+    st.markdown('<div class="section-heading"><span>📒</span> Sổ Dòng Tiền Thực Tế</div>', unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="upload-section">
-    <h4>📂 Upload File – dùng chung cho cả 3 module đối chiếu</h4>
-    </div>""", unsafe_allow_html=True)
+    ff1, ff2 = st.columns(2)
+    with ff1: phong2 = st.selectbox("🏠 Phòng", ["Tất cả"] + ROOMS, key="ph2")
+    with ff2: loai2  = st.selectbox("Loại", ["Tất cả", "Thu", "Chi"], key="lo2")
 
-    dcu1, dcu2 = st.columns(2)
-    with dcu1:
-        dc_f_nhap = st.file_uploader("📥 Báo cáo Nhập hàng trong tháng (có Mã HPT)",
-            type=["xlsx","xls"], accept_multiple_files=True, key="dc_nhap")
-    with dcu2:
-        dc_f_xuat = st.file_uploader("📤 Báo cáo Xuất kho trong tháng (có Mã HPT)",
-            type=["xlsx","xls"], accept_multiple_files=True, key="dc_xuat")
+    nav_y = st.session_state.nav_year
+    nav_m = st.session_state.nav_month
 
-    dcu3, dcu4 = st.columns(2)
-    with dcu3:
-        dc_f_tk = st.file_uploader("📋 File XNT Thống kê – số chuẩn (dùng chung)",
-            type=["xlsx","xls"], key="dc_tk")
-    with dcu4:
-        dc_f_xnt_tho = st.file_uploader("📊 File XNT thô HPT (chỉ cho tab Đối chiếu XNT)",
-            type=["xlsx","xls"], key="dc_xnt_tho")
+    NAV_MONTHS = ["Tháng 1","Tháng 2","Tháng 3","Tháng 4","Tháng 5","Tháng 6",
+                  "Tháng 7","Tháng 8","Tháng 9","Tháng 10","Tháng 11","Tháng 12"]
+    PERIOD_PRESETS = ["Tháng này","Quý 1","Quý 2","Quý 3","Quý 4",
+                      "6 Tháng đầu năm","6 Tháng cuối năm","Cả năm","Tùy chỉnh khoảng ngày"]
 
-    dcu5, dcu6 = st.columns(2)
-    with dcu5:
-        dc_f_bbkn = st.file_uploader("📄 Biên bản Kiểm nhập – BBKN",
-            type=["xlsx","xls"], key="dc_bbkn",
-            help="File dữ liệu thô HPT kiểm nhập — chứa Số lô, Hạn dùng. "
-                 "Dùng cho đối chiếu kiểm nhập VÀ tự động cập nhật lô/hạn cho BBKN · BBKK · XNT.")
-    with dcu6:
-        dc_f_bbkk = st.file_uploader("📄 Biên bản Kiểm kê – BBKK",
-            type=["xlsx","xls"], key="dc_bbkk")
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 4, 1])
+    with nav_col1:
+        if st.button("◀", key="nav_prev", use_container_width=True):
+            if nav_m == 1:
+                st.session_state.nav_month = 12
+                st.session_state.nav_year  = nav_y - 1
+            else:
+                st.session_state.nav_month = nav_m - 1
+            st.rerun()
+    with nav_col2:
+        st.markdown(f"""
+        <div style="text-align:center;font-size:1.08rem;font-weight:800;
+                    color:#1a7f5a;padding:8px 0;line-height:1.2">
+            {NAV_MONTHS[nav_m-1]}
+            <span style="font-size:.88rem;font-weight:500;color:#777;margin-left:6px">{nav_y}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with nav_col3:
+        if st.button("▶", key="nav_next", use_container_width=True):
+            if nav_m == 12:
+                st.session_state.nav_month = 1
+                st.session_state.nav_year  = nav_y + 1
+            else:
+                st.session_state.nav_month = nav_m + 1
+            st.rerun()
 
-    # Build shared lot_map: dùng dc_f_bbkn (có Số lô + Hạn dùng) + dc_f_nhap (có Mã HPT)
-    # Không cần ô upload riêng — BBKN chính là dữ liệu thô nhập tháng
-    _nhap_files = dc_f_nhap if dc_f_nhap else []
-    _nhap_file1 = _nhap_files[0] if _nhap_files else None
-    if dc_f_bbkn and _nhap_file1:
-        try:
-            dc_f_bbkn.seek(0); _nhap_file1.seek(0)
-            _df_dlt = pd.read_excel(io.BytesIO(dc_f_bbkn.read()),   sheet_name=0, header=None)
-            _df_ntt = pd.read_excel(io.BytesIO(_nhap_file1.read()), sheet_name=0, header=None)
-            _nhap_file1.seek(0); dc_f_bbkn.seek(0)
-            _ma_map, _fuzzy_map = build_lot_map(_df_dlt, _df_ntt)
-            st.session_state['shared_ma_map']    = _ma_map
-            st.session_state['shared_fuzzy_map'] = _fuzzy_map
-            st.markdown(
-                f'<div class="map-box">🔄 <b>Bảng lô/hạn sẵn sàng</b> (từ BBKN + Nhập trong tháng): '
-                f'{len(_ma_map)} mã HPT khớp chính xác · {len(_fuzzy_map)} khớp fuzzy '
-                f'— tự động áp dụng khi xuất BBKN · BBKK · XNT</div>',
-                unsafe_allow_html=True)
-        except Exception as _e:
-            st.warning(f"⚠️ Không build được bảng lô/hạn: {_e}")
-    elif dc_f_bbkn and not _nhap_file1:
-        st.info("💡 Upload thêm **Báo cáo Nhập hàng trong tháng** (ô trên) để kích hoạt cập nhật lô/hạn tự động.")
-    elif _nhap_file1 and not dc_f_bbkn:
-        st.info("💡 Upload **Biên bản Kiểm nhập – BBKN** (ô trên) để kích hoạt cập nhật lô/hạn tự động.")
+    if nav_y != today.year or nav_m != today.month:
+        if st.button("↩ Về tháng này", key="nav_today", use_container_width=False):
+            st.session_state.nav_month = today.month
+            st.session_state.nav_year  = today.year
+            st.rerun()
 
-    # Hiển thị trạng thái bảng mã
-    gmap_dc = st.session_state.get('dc_global_map')
-    if gmap_dc is not None and not gmap_dc.empty:
-        n_ma = gmap_dc['ma'].nunique()
-        st.markdown(f'<div class="map-box">✅ <b>Bảng mã hàng sẵn sàng:</b> {n_ma} mã HPT</div>',
-                    unsafe_allow_html=True)
+    with st.expander("⚙️ Kỳ xem mở rộng (Quý/Năm/Tùy chỉnh)", expanded=False):
+        ex1, ex2 = st.columns(2)
+        with ex1: ky2_ext = st.selectbox("Kỳ", PERIOD_PRESETS, key="ky2_ext")
+        with ex2: nam2_ext = st.selectbox("Năm", list(range(2023, today.year + 2)),
+                                           index=list(range(2023, today.year + 2)).index(today.year), key="nam2_ext")
+        cs2 = ce2 = None
+        if ky2_ext == "Tùy chỉnh khoảng ngày":
+            cx1, cx2 = st.columns(2)
+            with cx1: cs2 = st.date_input("Từ ngày", date(nam2_ext, 1, 1), key="cs2")
+            with cx2: ce2 = st.date_input("Đến ngày", today,               key="ce2")
+        s2_ext, e2_ext = get_date_range(ky2_ext, nam2_ext, cs2, ce2)
+        use_ext = st.checkbox("Dùng kỳ mở rộng này thay vì điều hướng tháng", key="use_ext")
 
-    st.markdown("<hr>", unsafe_allow_html=True)
+    if "use_ext" in st.session_state and st.session_state.use_ext:
+        s2 = s2_ext; e2 = e2_ext
+    else:
+        s2 = date(nav_y, nav_m, 1)
+        e2 = date(nav_y, nav_m, calendar.monthrange(nav_y, nav_m)[1])
 
-    # Tùy chọn cột SL
-    dc_sl_col_kn = 9; dc_sl_col_kk = 8
-    with st.expander("⚙️ Tùy chọn cột số lượng (nếu cấu trúc file khác mặc định)", expanded=False):
-        dcc1, dcc2 = st.columns(2)
-        with dcc1:
-            if dc_f_bbkn:
-                try:
-                    dc_f_bbkn.seek(0)
-                    pv = pd.read_excel(io.BytesIO(dc_f_bbkn.read()), sheet_name=0, header=None, nrows=12)
-                    dc_f_bbkn.seek(0)
-                    opts = {f"Cột {i} | {str(pv.iloc[9,i] if len(pv)>9 else '')[:28]}": i
-                            for i in range(len(pv.columns))}
-                    def_kn = next((k for k,v in opts.items() if v==9), list(opts.keys())[0])
-                    dc_sl_col_kn = opts[st.selectbox("Cột SL nhập trong BBKN:", list(opts.keys()),
-                        index=list(opts.keys()).index(def_kn), key="dc_sel_kn")]
-                except: pass
-        with dcc2:
-            if dc_f_bbkk:
-                try:
-                    dc_f_bbkk.seek(0)
-                    pv2 = pd.read_excel(io.BytesIO(dc_f_bbkk.read()), sheet_name=0, header=None, nrows=12)
-                    dc_f_bbkk.seek(0)
-                    opts2 = {f"Cột {i} | {str(pv2.iloc[9,i] if len(pv2)>9 else '')[:28]}": i
-                             for i in range(len(pv2.columns))}
-                    def_kk = next((k for k,v in opts2.items() if v==8), list(opts2.keys())[0])
-                    dc_sl_col_kk = opts2[st.selectbox("Cột SL thực tế trong BBKK:", list(opts2.keys()),
-                        index=list(opts2.keys()).index(def_kk), key="dc_sel_kk")]
-                except: pass
+    sd2_dau, t2_thu, t2_chi, sd2_cuoi = compute_balances(df_real2, s2, e2)
 
-    # 3 sub-tabs bên trong tab Đối Chiếu
-    sub_xnt, sub_kn, sub_kk = st.tabs([
-        "📊 Đối chiếu XNT",
-        "📥 Đối chiếu Kiểm nhập",
-        "🔍 Đối chiếu Kiểm kê",
-    ])
+    st.markdown(f"""
+    <div class="sb">
+        <div class="sc dau">
+            <div class="sl">SỐ DƯ ĐẦU KỲ</div>
+            <div class="sv" style="color:{'#1a9e5f' if sd2_dau>=0 else '#e05252'}">{fmt_vnd(sd2_dau)}</div>
+        </div>
+        <div class="sc thu">
+            <div class="sl">TỔNG THU</div>
+            <div class="sv">+{fmt_vnd(t2_thu)}</div>
+        </div>
+        <div class="sc chi">
+            <div class="sl">TỔNG CHI</div>
+            <div class="sv">-{fmt_vnd(t2_chi)}</div>
+        </div>
+        <div class="sc end">
+            <div class="sl">SỐ DƯ CUỐI KỲ</div>
+            <div class="sv">{fmt_vnd(sd2_cuoi)}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ── SUB-TAB: XNT ──────────────────────────────────────────────────────────
-    with sub_xnt:
-        st.markdown("""<div class="info-box">
-        Cần file <b>XNT thô HPT</b> + <b>XNT Thống kê</b> + file <b>Nhập/Xuất kho</b>.
-        </div>""", unsafe_allow_html=True)
-        ready_dc_xnt = bool((dc_f_nhap or dc_f_xuat) and dc_f_xnt_tho and dc_f_tk)
-        if st.button("🔍 Chạy Đối chiếu XNT", key="dc_btn_xnt", disabled=not ready_dc_xnt):
-            with st.spinner("Đang xử lý đối chiếu XNT..."):
-                try:
-                    dfs_nx = []
-                    for f in (dc_f_nhap or []):
-                        f.seek(0); dfs_nx.append(pd.read_excel(io.BytesIO(f.read()), sheet_name=0, header=None))
-                    for f in (dc_f_xuat or []):
-                        f.seek(0); dfs_nx.append(pd.read_excel(io.BytesIO(f.read()), sheet_name=0, header=None))
-                    st.session_state['dc_global_map'] = dc_extract_ma_map(dfs_nx)
-                    dc_f_xnt_tho.seek(0); dc_f_tk.seek(0)
-                    df_xnt_raw = pd.read_excel(io.BytesIO(dc_f_xnt_tho.read()), sheet_name=0, header=None)
-                    df_tk_raw  = pd.read_excel(io.BytesIO(dc_f_tk.read()), sheet_name=0, header=None)
-                    df_res, err = dc_run_xnt(dfs_nx, df_xnt_raw, df_tk_raw)
-                    if err: st.error(f"❌ {err}"); st.stop()
-                    st.session_state.update({'dc_xnt_result': df_res, 'dc_xnt_done': True, 'dc_tn': dc_tn})
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
+    # Pending warning badge
+    df_cho_tt = df_all2[df_all2["trang_thai"] == "Chờ thanh toán"] if not df_all2.empty else pd.DataFrame()
+    if not df_cho_tt.empty:
+        tong_cho = df_cho_tt["so_tien"].sum()
+        st.markdown(f"""
+        <div class="pending-badge">
+            ⏳ <b>{len(df_cho_tt)} giao dịch</b> · <b>{fmt_vnd(tong_cho)}</b>
+            đang <b>Chờ thanh toán</b> — chưa tính vào sổ này.
+            Vào tab <b>📤 Import & Thu Tiền</b> để xác nhận.
+        </div>
+        """, unsafe_allow_html=True)
 
-        if st.session_state.get('dc_xnt_done'):
-            df_r = st.session_state['dc_xnt_result']
-            dm   = df_r[df_r['cl'].notna()]
-            nk   = (dm['cl'].abs()<0.01).sum(); nl = (dm['cl'].abs()>=0.01).sum()
-            dn_tk  = df_r[df_r['method']=='no_tk'];  dn_xnt = df_r[df_r['method']=='no_xnt']
-            st.markdown(f"""<div class="ok-box"><div class="icon">✅</div>
-              <h3>Đối chiếu XNT hoàn tất – {st.session_state.get('dc_tn','')}</h3></div>
-            <div class="stat-grid-4">
-              <div class="stat-card"><div class="num" style="color:#166534">{nk}</div><div class="lbl">✅ Khớp</div></div>
-              <div class="stat-card"><div class="num" style="color:#dc2626">{nl}</div><div class="lbl">⚠️ Chênh lệch</div></div>
-              <div class="stat-card"><div class="num" style="color:#2563a8">{len(dn_tk)}</div><div class="lbl">HPT có – TK không</div></div>
-              <div class="stat-card"><div class="num" style="color:#d97706">{len(dn_xnt)}</div><div class="lbl">TK có – HPT không</div></div>
-            </div>""", unsafe_allow_html=True)
-            # Thống kê riêng cho xuất
-            nk_xuat = (dm['cl_xuat'].abs()<0.01).sum() if 'cl_xuat' in dm.columns else 0
-            nl_xuat = (dm['cl_xuat'].abs()>=0.01).sum() if 'cl_xuat' in dm.columns else 0
-            st.markdown(f"""<div class="stat-grid">
-              <div class="stat-card"><div class="num" style="color:#166534">{nk_xuat}</div><div class="lbl">✅ Xuất khớp</div></div>
-              <div class="stat-card"><div class="num" style="color:#dc2626">{nl_xuat}</div><div class="lbl">⚠️ Xuất chênh lệch</div></div>
-            </div>""", unsafe_allow_html=True)
-            dl = dm[(dm['cl'].abs()>=0.01) | (dm.get('cl_xuat', 0).abs()>=0.01)].sort_values('cl')
-            if len(dl):
-                st.markdown(f"**⚠️ {len(dl)} dòng có chênh lệch (xuất hoặc tồn):**")
-                cols_show = ['ma','ten','nd','xuat_xnt','xuat_tk','cl_xuat','ton_xnt','ton_tk','cl']
-                cols_show = [c for c in cols_show if c in dl.columns]
-                st.dataframe(dl[cols_show].rename(columns={
-                    'ma':'Mã HPT','ten':'Tên thuốc','nd':'Nồng độ',
-                    'xuat_xnt':'Xuất HPT','xuat_tk':'Xuất TK','cl_xuat':'CL Xuất',
-                    'ton_xnt':'Tồn HPT','ton_tk':'Tồn TK','cl':'CL Tồn'}),
-                    use_container_width=True, hide_index=True)
+    df_f2 = df_real2.copy() if not df_real2.empty else pd.DataFrame()
+    if not df_f2.empty:
+        df_f2 = df_f2[(df_f2["ngay"].dt.date >= s2) & (df_f2["ngay"].dt.date <= e2)]
+        if phong2 != "Tất cả": df_f2 = df_f2[df_f2["ma_phong"] == phong2]
+        if loai2  != "Tất cả": df_f2 = df_f2[df_f2["loai"] == loai2]
+        df_f2 = df_f2.sort_values("ngay")
 
-    # ── SUB-TAB: KIỂM NHẬP ────────────────────────────────────────────────────
-    with sub_kn:
-        st.markdown("""<div class="info-box">
-        Cần file <b>BBKN</b> + <b>XNT Thống kê</b>. App tự động cộng tổng tất cả hóa đơn cùng tên+nồng độ+giá.
-        </div>""", unsafe_allow_html=True)
-        ready_dc_kn = bool(dc_f_bbkn and dc_f_tk)
-        if st.button("🔍 Chạy Đối chiếu Kiểm nhập", key="dc_btn_kn", disabled=not ready_dc_kn):
-            with st.spinner("Đang xử lý Kiểm nhập..."):
-                try:
-                    dc_f_bbkn.seek(0); dc_f_tk.seek(0)
-                    df_bbkn_raw = pd.read_excel(io.BytesIO(dc_f_bbkn.read()), sheet_name=0, header=None)
-                    df_tk_raw   = pd.read_excel(io.BytesIO(dc_f_tk.read()), sheet_name=0, header=None)
-                    gmap_cur    = st.session_state.get('dc_global_map', pd.DataFrame())
-                    df_res, err = dc_run_kn(df_bbkn_raw, df_tk_raw, gmap_cur, dc_sl_col_kn)
-                    if err: st.error(f"❌ {err}"); st.stop()
-                    st.session_state.update({'dc_kn_result': df_res, 'dc_kn_done': True, 'dc_tn': dc_tn})
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
+    if df_f2.empty:
+        st.info("Không có giao dịch thực thu trong kỳ đã chọn.")
+    else:
+        df_f2["ngay_str"] = df_f2["ngay"].dt.strftime("%d/%m/%Y")
+        for nstr, grp in df_f2.groupby("ngay_str", sort=False):
+            net = grp[grp["loai"] == "Thu"]["so_tien"].sum() - grp[grp["loai"] == "Chi"]["so_tien"].sum()
+            nc  = "#1a9e5f" if net >= 0 else "#e05252"
+            st.markdown(f"""
+            <div style="display:flex;justify-content:space-between;padding:5px 4px;
+                        border-bottom:1px solid #f0f0f0;margin:10px 0 4px">
+                <div style="font-weight:700;color:#333">{nstr}</div>
+                <div style="font-size:.84rem;font-weight:700;color:{nc}">{'+'if net>=0 else ''}{fmt_vnd(net)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            for _, r in grp.iterrows():
+                icon = "📈" if r["loai"] == "Thu" else "📉"
+                cls  = "thu" if r["loai"] == "Thu" else "chi"
+                pref = "+" if r["loai"] == "Thu" else "-"
+                note = f" · {r['ghi_chu']}" if str(r.get("ghi_chu", "")).strip() else ""
+                gd_id   = int(r["id"])
+                is_sel  = st.session_state.selected_gd == gd_id
+                is_edit = st.session_state.edit_id     == gd_id
 
-        if st.session_state.get('dc_kn_done'):
-            df_kn = st.session_state['dc_kn_result']
-            dm_kn = df_kn[df_kn['status']=='matched']
-            nk_kn = (dm_kn['cl'].abs()<0.01).sum(); nl_kn = (dm_kn['cl'].abs()>=0.01).sum()
-            no_tk_kn = df_kn[df_kn['status']=='hpt_no_tk']; no_hpt_kn = df_kn[df_kn['status']=='tk_no_hpt']
-            st.markdown(f"""<div class="ok-box"><div class="icon">✅</div>
-              <h3>Đối chiếu Kiểm nhập hoàn tất – {st.session_state.get('dc_tn','')}</h3></div>
-            <div class="stat-grid-4">
-              <div class="stat-card"><div class="num" style="color:#166534">{nk_kn}</div><div class="lbl">✅ Khớp</div></div>
-              <div class="stat-card"><div class="num" style="color:#dc2626">{nl_kn}</div><div class="lbl">⚠️ Chênh lệch</div></div>
-              <div class="stat-card"><div class="num" style="color:#2563a8">{len(no_tk_kn)}</div><div class="lbl">HPT có – TK không</div></div>
-              <div class="stat-card"><div class="num" style="color:#d97706">{len(no_hpt_kn)}</div><div class="lbl">TK có – HPT không</div></div>
-            </div>""", unsafe_allow_html=True)
-            dl_kn = dm_kn[dm_kn['cl'].abs()>=0.01].sort_values('cl')
-            if len(dl_kn):
-                st.markdown(f"**⚠️ {nl_kn} dòng chênh lệch:**")
-                st.dataframe(dl_kn[['ma','ten_hpt','nd','nhap_hpt','nhap_tk','cl']].rename(columns={
-                    'ma':'Mã HPT','ten_hpt':'Tên thuốc (HPT)','nd':'Nồng độ',
-                    'nhap_hpt':'Nhập HPT (tổng)','nhap_tk':'Nhập TK','cl':'Chênh lệch'}),
-                    use_container_width=True, hide_index=True)
-            if len(no_hpt_kn):
-                st.markdown(f"**📋 {len(no_hpt_kn)} mã – TK có nhập, HPT không có:**")
-                st.dataframe(no_hpt_kn[['ma','ten_tk','nd','nhap_tk']].rename(columns={
-                    'ma':'Mã HPT','ten_tk':'Tên thuốc TK','nd':'Nồng độ','nhap_tk':'Nhập TK'}),
-                    use_container_width=True, hide_index=True)
+                col_card, col_tap = st.columns([20, 1])
+                with col_card:
+                    st.markdown(f"""
+                    <div class="tx">
+                      <div class="ti {cls}">{icon}</div>
+                      <div class="tn">
+                        <div class="tc">{r['danh_muc']}</div>
+                        <div class="tm">{r['ma_phong']}{note}</div>
+                      </div>
+                      <div class="ta {cls}">{pref}{fmt_vnd(r['so_tien'])}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_tap:
+                    tap_label = "▲" if is_sel else "▼"
+                    if st.button(tap_label, key=f"tap_{gd_id}", use_container_width=True):
+                        if is_sel:
+                            st.session_state.selected_gd = None
+                            st.session_state.edit_id     = None
+                        else:
+                            st.session_state.selected_gd = gd_id
+                            st.session_state.edit_id     = None
+                        st.rerun()
 
-    # ── SUB-TAB: KIỂM KÊ ──────────────────────────────────────────────────────
-    with sub_kk:
-        st.markdown("""<div class="info-box">
-        Cần file <b>BBKK</b> + <b>XNT Thống kê</b>. App tự động cộng tổng các dòng cùng tên+nồng độ+giá.
-        </div>""", unsafe_allow_html=True)
-        ready_dc_kk = bool(dc_f_bbkk and dc_f_tk)
-        if st.button("🔍 Chạy Đối chiếu Kiểm kê", key="dc_btn_kk", disabled=not ready_dc_kk):
-            with st.spinner("Đang xử lý Kiểm kê..."):
-                try:
-                    dc_f_bbkk.seek(0); dc_f_tk.seek(0)
-                    df_bbkk_raw = pd.read_excel(io.BytesIO(dc_f_bbkk.read()), sheet_name=0, header=None)
-                    df_tk_raw   = pd.read_excel(io.BytesIO(dc_f_tk.read()), sheet_name=0, header=None)
-                    gmap_cur    = st.session_state.get('dc_global_map', pd.DataFrame())
-                    df_res, err = dc_run_kk(df_bbkk_raw, df_tk_raw, gmap_cur, dc_sl_col_kk)
-                    if err: st.error(f"❌ {err}"); st.stop()
-                    st.session_state.update({'dc_kk_result': df_res, 'dc_kk_done': True, 'dc_tn': dc_tn})
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {e}"); st.exception(e)
+                # ── Action bar ───────────────────────────────────────────────
+                if is_sel and not is_edit:
+                    ab1, ab2, ab3 = st.columns(3)
+                    with ab1:
+                        if st.button("✏️  Sửa", key=f"act_edit_{gd_id}",
+                                     use_container_width=True, type="primary"):
+                            st.session_state.edit_id = gd_id
+                            st.rerun()
+                    with ab2:
+                        if st.button("📋  Copy", key=f"act_copy_{gd_id}",
+                                     use_container_width=True):
+                            insert_gd(r["ngay"].date(), r["loai"], r["ma_phong"],
+                                      r["danh_muc"], int(r["so_tien"]),
+                                      str(r.get("ghi_chu", "") or ""),
+                                      trang_thai="Đã thu")
+                            st.session_state.selected_gd = None
+                            st.rerun()
+                    with ab3:
+                        if st.button("🗑️  Xóa", key=f"act_del_{gd_id}",
+                                     use_container_width=True):
+                            delete_gd(gd_id)
+                            st.session_state.selected_gd = None
+                            st.rerun()
 
-        if st.session_state.get('dc_kk_done'):
-            df_kk2 = st.session_state['dc_kk_result']
-            dm_kk  = df_kk2[df_kk2['status']=='matched']
-            nk_kk  = (dm_kk['cl'].abs()<0.01).sum(); nl_kk = (dm_kk['cl'].abs()>=0.01).sum()
-            no_tk2 = df_kk2[df_kk2['status']=='hpt_no_tk']; no_hpt2 = df_kk2[df_kk2['status']=='tk_no_hpt']
-            st.markdown(f"""<div class="ok-box"><div class="icon">✅</div>
-              <h3>Đối chiếu Kiểm kê hoàn tất – {st.session_state.get('dc_tn','')}</h3></div>
-            <div class="stat-grid-4">
-              <div class="stat-card"><div class="num" style="color:#166534">{nk_kk}</div><div class="lbl">✅ Khớp</div></div>
-              <div class="stat-card"><div class="num" style="color:#dc2626">{nl_kk}</div><div class="lbl">⚠️ Chênh lệch</div></div>
-              <div class="stat-card"><div class="num" style="color:#2563a8">{len(no_tk2)}</div><div class="lbl">HPT có – TK không</div></div>
-              <div class="stat-card"><div class="num" style="color:#d97706">{len(no_hpt2)}</div><div class="lbl">TK có – HPT không</div></div>
-            </div>""", unsafe_allow_html=True)
-            dl_kk = dm_kk[dm_kk['cl'].abs()>=0.01].sort_values('cl')
-            if len(dl_kk):
-                st.markdown(f"**⚠️ {nl_kk} dòng chênh lệch:**")
-                st.dataframe(dl_kk[['ma','ten_hpt','nd','sl_kk','ton_tk','cl']].rename(columns={
-                    'ma':'Mã HPT','ten_hpt':'Tên thuốc (HPT)','nd':'Nồng độ',
-                    'sl_kk':'SL Kiểm kê','ton_tk':'Tồn TK','cl':'Chênh lệch'}),
-                    use_container_width=True, hide_index=True)
-            if len(no_hpt2):
-                st.markdown(f"**📋 {len(no_hpt2)} mã – TK có tồn, HPT không có:**")
-                st.dataframe(no_hpt2[['ma','ten_tk','nd','ton_tk']].rename(columns={
-                    'ma':'Mã HPT','ten_tk':'Tên thuốc TK','nd':'Nồng độ','ton_tk':'Tồn TK'}),
-                    use_container_width=True, hide_index=True)
+                # ── Form sửa inline ──────────────────────────────────────────
+                if is_edit:
+                    st.markdown('<div class="edit-form"><div class="edit-form-title">✏️ Sửa giao dịch</div>', unsafe_allow_html=True)
+                    ef1, ef2 = st.columns(2)
+                    with ef1:
+                        e_loai = st.radio("Loại", ["Thu", "Chi"],
+                            index=0 if r["loai"] == "Thu" else 1,
+                            horizontal=True, key=f"eloai_{gd_id}")
+                        e_ngay = st.date_input("Ngày", value=r["ngay"].date(), key=f"engay_{gd_id}")
+                        if e_loai == "Thu":
+                            e_phong = st.selectbox("Phòng", ROOMS,
+                                index=ROOMS.index(r["ma_phong"]) if r["ma_phong"] in ROOMS else 0,
+                                key=f"ephong_{gd_id}")
+                            e_dm = st.selectbox("Danh mục", DANH_MUC_THU,
+                                index=DANH_MUC_THU.index(r["danh_muc"]) if r["danh_muc"] in DANH_MUC_THU else 0,
+                                key=f"edm_{gd_id}")
+                        else:
+                            e_phong = "Chung"
+                            e_dm = st.selectbox("Danh mục", DANH_MUC_CHI,
+                                index=DANH_MUC_CHI.index(r["danh_muc"]) if r["danh_muc"] in DANH_MUC_CHI else 0,
+                                key=f"edm_{gd_id}")
+                    with ef2:
+                        e_tien_raw = st.text_input("Số tiền (₫)", value=str(int(r["so_tien"])),
+                            placeholder="VD: 1500000", key=f"etien_{gd_id}")
+                        e_tien = parse_tien(e_tien_raw)
+                        e_gc = st.text_input("Ghi chú", value=str(r.get("ghi_chu", "") or ""),
+                            key=f"egc_{gd_id}")
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        btn_luu, btn_huy = st.columns(2)
+                        with btn_luu:
+                            if st.button("💾 Lưu", key=f"esave_{gd_id}", type="primary"):
+                                ok = update_gd(gd_id, e_ngay, e_loai,
+                                               e_phong if e_loai == "Thu" else "Chung",
+                                               e_dm, e_tien, e_gc)
+                                if ok:
+                                    st.toast("✅ Đã cập nhật giao dịch!", icon="💾")
+                                    st.session_state.edit_id     = None
+                                    st.session_state.selected_gd = None
+                                    st.rerun()
+                        with btn_huy:
+                            if st.button("✖ Huỷ", key=f"ecancel_{gd_id}"):
+                                st.session_state.edit_id     = None
+                                st.session_state.selected_gd = None
+                                st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Xuất Excel tổng hợp đối chiếu ─────────────────────────────────────────
-    dc_has_any = any(st.session_state.get(k) for k in ['dc_xnt_done','dc_kn_done','dc_kk_done'])
-    if dc_has_any:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown("### 📥 Tải kết quả đối chiếu tổng hợp")
-        st.markdown("""<div class="info-box">
-        File Excel gộp tất cả kết quả vào các Sheet riêng biệt.
-        Màu <span style="background:#E2EFDA;padding:1px 6px;border-radius:3px">🟢 Xanh</span> = Khớp |
-        <span style="background:#FFD7D7;padding:1px 6px;border-radius:3px">🔴 Đỏ</span> = Lệch.
-        </div>""", unsafe_allow_html=True)
-        tn_export = st.session_state.get('dc_tn', dc_tn)
-        excel_bytes = dc_export_excel(
-            st.session_state.get('dc_xnt_result'),
-            st.session_state.get('dc_kn_result'),
-            st.session_state.get('dc_kk_result'),
-            tn_export)
+    st.markdown("---")
+    if not df_real2.empty:
         st.download_button(
-            label=f"⬇️ Tải Kết Quả Đối Chiếu Tổng Hợp {tn_export} (.xlsx)",
-            data=excel_bytes,
-            file_name=f"doi_chieu_tong_hop_{tn_export.replace('/','_')}.xlsx",
+            f"📥 Xuất Excel Dòng Tiền ({s2.strftime('%d/%m/%Y')} – {e2.strftime('%d/%m/%Y')})",
+            data=xuat_dong_tien(df_real2, s2, e2),
+            file_name=f"DongTien_{s2.strftime('%d%m%Y')}_{e2.strftime('%d%m%Y')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dc_dl_all")
+        )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 4 — XUẤT SỔ THUẾ
+# ════════════════════════════════════════════════════════════════════════════
+with tab4:
+    df_all3 = load_all()
+    df_real3 = df_all3[df_all3["trang_thai"].isin(TRANG_THAI_DA_THU)].copy() if not df_all3.empty else df_all3.copy()
+
+    st.markdown('<div class="section-heading"><span>📊</span> Xuất Sổ Thuế — TT152/2025/TT-BTC</div>', unsafe_allow_html=True)
+    st.markdown("""<div class="tax-info">
+        <b>📋 S1a-HKD</b>: Doanh thu tiền phòng (không bao gồm điện/nước thu hộ).<br>
+        <b>📋 S2a-HKD</b>: Chỉ tiền phòng · Tự tính <b>GTGT 5%</b> + <b>TNCN 2%</b>.<br>
+        <b>⚠️ Lưu ý:</b> Chỉ tính giao dịch trạng thái <b>Đã thu / Đã thanh toán</b>.
+    </div>""", unsafe_allow_html=True)
+
+    tc1, tc2 = st.columns([3, 1])
+    with tc1: ky3  = st.selectbox("📅 Kỳ kê khai", KY_OPTIONS, key="ky3")
+    with tc2: nam3 = st.selectbox("Năm", list(range(2023, today.year + 2)),
+                                   index=list(range(2023, today.year + 2)).index(today.year), key="nam3")
+    cs3 = ce3 = None
+    if ky3 == "Tùy chỉnh khoảng ngày":
+        cx3a, cx3b = st.columns(2)
+        with cx3a: cs3 = st.date_input("Từ ngày", date(nam3, 1, 1), key="cs3")
+        with cx3b: ce3 = st.date_input("Đến ngày", today,           key="ce3")
+
+    s3, e3 = get_date_range(ky3, nam3, cs3, ce3)
+    st.markdown(f"<div style='font-size:.84rem;color:#888;margin:4px 0 14px'>📆 Kỳ: <b>{s3.strftime('%d/%m/%Y')}</b> → <b>{e3.strftime('%d/%m/%Y')}</b></div>", unsafe_allow_html=True)
+
+    if not df_real3.empty:
+        df_ky3  = df_real3[(df_real3["ngay"].dt.date >= s3) & (df_real3["ngay"].dt.date <= e3)]
+        n_thu   = len(df_ky3[(df_ky3["loai"] == "Thu") & (df_ky3["danh_muc"] == "Doanh thu tiền phòng")])
+        n_phong = n_thu
+        tong_s1 = df_ky3[(df_ky3["loai"] == "Thu") & (df_ky3["danh_muc"] == "Doanh thu tiền phòng")]["so_tien"].sum()
+        tong_s2 = tong_s1
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Giao dịch Thu (S1a)", n_thu)
+        m2.metric("Giao dịch phòng (S2a)", n_phong)
+        m3.metric("Tổng Thu (S1a)", fmt_vnd(tong_s1))
+        m4.metric("Doanh thu phòng (S2a)", fmt_vnd(tong_s2))
+
+        if tong_s2 > 0:
+            st.markdown(f"""
+            <div style="background:#fff5f0;border-radius:12px;padding:14px 20px;margin:12px 0;
+                        font-size:.88rem;display:flex;gap:32px;flex-wrap:wrap;border:1.5px solid #fdd;">
+                <div>🟡 <b>GTGT (5%)</b>: <span style="font-weight:800;color:#c0392b;font-size:1.05rem">{fmt_vnd(round(tong_s2*0.05))}</span></div>
+                <div>🔵 <b>TNCN (2%)</b>: <span style="font-weight:800;color:#c0392b;font-size:1.05rem">{fmt_vnd(round(tong_s2*0.02))}</span></div>
+                <div>💰 <b>Tổng thuế (7%)</b>: <span style="font-weight:800;color:#8b0000;font-size:1.05rem">{fmt_vnd(round(tong_s2*0.07))}</span></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        xc1, xc2 = st.columns(2)
+        with xc1:
+            st.markdown("**📗 Sổ S1a-HKD — Doanh thu tiền phòng**")
+            st.markdown("<div style='font-size:.79rem;color:#888;margin-bottom:10px'>Chỉ doanh thu tiền phòng · Không tính điện/nước thu hộ</div>", unsafe_allow_html=True)
+            if n_thu > 0:
+                st.download_button("📥 Xuất S1a-HKD",
+                    data=xuat_s1a(df_real3, s3, e3),
+                    file_name=f"S1a_HKD_{s3.strftime('%d%m%Y')}_{e3.strftime('%d%m%Y')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+            else:
+                st.info("Không có dữ liệu Thu thực tế trong kỳ.")
+        with xc2:
+            st.markdown("**📘 Sổ S2a-HKD — Phân loại + Tính thuế**")
+            st.markdown("<div style='font-size:.79rem;color:#888;margin-bottom:10px'>Chỉ tiền phòng · GTGT 5% + TNCN 2%</div>", unsafe_allow_html=True)
+            if n_phong > 0:
+                st.download_button("📥 Xuất S2a-HKD",
+                    data=xuat_s2a(df_real3, s3, e3),
+                    file_name=f"S2a_HKD_{s3.strftime('%d%m%Y')}_{e3.strftime('%d%m%Y')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+            else:
+                st.info("Không có doanh thu tiền phòng thực tế trong kỳ.")
+    else:
+        st.info("Chưa có dữ liệu thực thu.")
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 5 — QUẢN LÝ TIỀN CỌC
+# Dữ liệu cọc TUYỆT ĐỐI tách biệt — không lọt vào thu chi / sổ thuế
+# ════════════════════════════════════════════════════════════════════════════
+with tab5:
+
+    # ── Helper: lấy giá phòng hiện tại từ dữ liệu giao_dich (tham chiếu ngầm)
+    def _get_gia_phong_hien_tai() -> dict:
+        """
+        Lấy giá phòng (tiền thuê phòng) mới nhất của mỗi phòng từ tab giao_dich.
+        Dùng để đối chiếu ngầm với tiền cọc — chỉ đọc, không ảnh hưởng logic.
+        """
+        try:
+            df_ref = load_all()
+            if df_ref.empty:
+                return {}
+            df_phong = df_ref[
+                (df_ref["loai"] == "Thu") &
+                (df_ref["danh_muc"] == "Doanh thu tiền phòng") &
+                (df_ref["trang_thai"].isin(TRANG_THAI_DA_THU))
+            ].copy()
+            if df_phong.empty:
+                return {}
+            # Lấy giao dịch mới nhất của mỗi phòng
+            idx_latest = df_phong.groupby("ma_phong")["ngay"].idxmax()
+            df_latest  = df_phong.loc[idx_latest]
+            return dict(zip(df_latest["ma_phong"], df_latest["so_tien"]))
+        except Exception:
+            return {}
+
+    st.markdown('<div class="section-heading"><span>📌</span> Quản lý Tiền Cọc — 9 Phòng</div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#f4f0ff,#ede8ff);border:1.5px solid #c9baff;
+                border-radius:12px;padding:12px 18px;margin-bottom:18px;font-size:.86rem;color:#5b2dd9;">
+        <b>📌 Khoản giữ hộ:</b> Tiền cọc <b>không được</b> tính vào dòng tiền, báo cáo thu chi,
+        hay sổ thuế S1a/S2a. Đây là khu vực quản lý riêng biệt, chỉ để theo dõi số tiền đang giữ hộ khách thuê.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Tải dữ liệu cọc + giá phòng tham chiếu
+    df_coc     = load_coc()
+    gia_phong  = _get_gia_phong_hien_tai()
+
+    # ═══ LAYOUT: Trên (bảng tổng hợp) / Dưới (form cập nhật fragment) ════════
+    # ── PHẦN TRÊN: Bảng tổng hợp + Tổng quỹ cọc ─────────────────────────────
+    st.markdown("#### 📋 Bảng Tổng Hợp Tiền Cọc Hiện Tại")
+
+    tong_coc = int(df_coc["so_tien_coc"].sum())
+    n_co_coc = len(df_coc[df_coc["so_tien_coc"] > 0])
+
+    # Thẻ tổng quỹ cọc
+    st.markdown(f"""
+    <div class="coc-total-box">
+        <div class="coc-total-label">Tổng Quỹ Tiền Cọc Đang Giữ Hộ</div>
+        <div class="coc-total-amount">{fmt_vnd(tong_coc)}</div>
+        <div class="coc-total-sub">{n_co_coc} / {len(ROOMS)} phòng đang có cọc · Đây là khoản giữ hộ, sẽ trả lại khách khi trả phòng</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Hiển thị lưới 9 phòng — render từng hàng 3 phòng để đảm bảo thứ tự
+    # P101 P201 P202 / P301 P302 P401 / P402 P501 P502 — đúng trên cả mobile lẫn desktop
+    rooms_data = []
+    for i, row in df_coc.iterrows():
+        phong    = row["ma_phong"]
+        ten_kh   = str(row.get("ten_kh", "") or "").strip()
+        so_coc   = int(row.get("so_tien_coc", 0) or 0)
+        ngay_coc = row.get("ngay_coc")
+        ghi_chu  = str(row.get("ghi_chu", "") or "").strip()
+        gia_ht   = gia_phong.get(phong, 0)
+        rooms_data.append((phong, ten_kh, so_coc, ngay_coc, ghi_chu, gia_ht))
+
+    # Render từng hàng 3 cột — thứ tự luôn đúng vì Python loop theo hàng
+    for row_start in range(0, len(rooms_data), 3):
+        row_items = rooms_data[row_start : row_start + 3]
+        cols = st.columns(len(row_items))
+        for col, (phong, ten_kh, so_coc, ngay_coc, ghi_chu, gia_ht) in zip(cols, row_items):
+            warn_html = ""
+            if so_coc > 0 and gia_ht > 0 and so_coc < gia_ht:
+                warn_html = f'<div class="coc-warn">⚠️ Cọc &lt; Giá phòng hiện tại ({fmt_vnd(gia_ht)})</div>'
+            if so_coc > 0:
+                ngay_str    = ngay_coc.strftime("%d/%m/%Y") if pd.notna(ngay_coc) else "—"
+                meta_parts  = [f"📅 {ngay_str}"]
+                if ten_kh:  meta_parts.append(f"👤 {ten_kh}")
+                if ghi_chu: meta_parts.append(f"📝 {ghi_chu}")
+                meta = " · ".join(meta_parts)
+                card = f"""<div class="coc-card">
+  <div class="coc-header">📦 {phong}</div>
+  <div class="coc-room">{phong}</div>
+  <div class="coc-amount">{fmt_vnd(so_coc)}</div>
+  <div class="coc-meta">{meta}</div>
+  {warn_html}
+</div>"""
+            else:
+                card = f"""<div class="coc-card coc-empty">
+  <div class="coc-header">📦 {phong}</div>
+  <div class="coc-room">{phong}</div>
+  <div class="coc-amount" style="color:#bbb">Chưa có cọc</div>
+  <div class="coc-meta">— Chưa cập nhật —</div>
+</div>"""
+            with col:
+                st.markdown(card, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ═══ PHẦN DƯỚI: Form cập nhật (dùng @st.fragment để tránh lag) ════════════
+    @st.fragment
+    def fragment_cap_nhat_coc():
+        cfv = st.session_state.coc_form_ver
+
+        st.markdown('<div class="section-heading"><span>✏️</span> Cập Nhật Thông Tin Tiền Cọc</div>', unsafe_allow_html=True)
+
+        fc1, fc2 = st.columns([1, 2], gap="large")
+
+        # ── Cột trái: chọn phòng + preview cọc hiện tại ──────────────────────
+        with fc1:
+            phong_sel = st.selectbox(
+                "🏠 Chọn phòng",
+                ROOMS,
+                key=f"coc_phong_sel_{cfv}",
+            )
+            df_coc_now = load_coc()
+            row_now    = df_coc_now[df_coc_now["ma_phong"] == phong_sel]
+            if not row_now.empty:
+                r          = row_now.iloc[0]
+                so_coc_now = int(r.get("so_tien_coc", 0) or 0)
+                if so_coc_now > 0:
+                    ten_now   = str(r.get("ten_kh",  "") or "")
+                    ngay_now  = r.get("ngay_coc")
+                    ngay_disp = ngay_now.strftime("%d/%m/%Y") if pd.notna(ngay_now) else "—"
+                    st.markdown(f"""
+                    <div style="background:#f4f0ff;border:1px solid #c9baff;border-radius:10px;
+                                padding:12px 14px;font-size:.83rem;color:#5b2dd9;">
+                        <b>📌 Đang giữ cọc {phong_sel}:</b><br>
+                        💰 {fmt_vnd(so_coc_now)}<br>
+                        👤 {ten_now or '—'}<br>
+                        📅 {ngay_disp}
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="background:#f9f9f9;border:1px dashed #ddd;border-radius:10px;
+                                padding:12px 14px;font-size:.83rem;color:#aaa;">
+                        <i>Phòng {phong_sel} chưa có tiền cọc.</i>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # ── Cột phải: form nhập liệu (Enter = submit) ─────────────────────────
+        with fc2:
+            # Tên khách + ngày cọc bên ngoài form (không cần Enter submit)
+            ten_kh_inp   = st.text_input(
+                "👤 Tên khách thuê",
+                placeholder="Nguyễn Văn A",
+                key=f"coc_ten_kh_{cfv}",
+            )
+            ngay_coc_inp = st.date_input(
+                "📅 Ngày đặt cọc",
+                value=today,
+                key=f"coc_ngay_{cfv}",
+            )
+
+            # Số tiền bên ngoài form để hiển thị preview realtime
+            so_coc_raw = st.text_input(
+                "💰 Số tiền cọc (₫)",
+                placeholder="VD: 4.500.000",
+                key=f"coc_so_tien_{cfv}",
+                on_change=lambda: st.session_state.update(
+                    coc_live_tien=st.session_state.get(f"coc_so_tien_{cfv}", "")
+                ),
+            )
+            so_coc_val = parse_tien(so_coc_raw)
+            if so_coc_val > 0:
+                st.markdown(
+                    f"<div style='color:#5b2dd9;font-weight:800;font-size:1.2rem;"
+                    f"margin:-2px 0 6px'>{fmt_vnd(so_coc_val)}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Ghi chú + nút Lưu cùng trong 1 st.form → Enter sẽ submit
+            with st.form(key=f"form_coc_{cfv}", clear_on_submit=True):
+                ghi_chu_inp   = st.text_input(
+                    "📝 Ghi chú (tùy chọn)",
+                    placeholder="VD: Cọc hợp đồng T01/2025, ...",
+                    key=f"coc_ghichu_{cfv}",
+                )
+                submitted_coc = st.form_submit_button(
+                    "💾  Lưu thông tin cọc",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            if submitted_coc:
+                so_coc_submit = parse_tien(
+                    st.session_state.get(f"coc_so_tien_{cfv}", "")
+                )
+                ten_submit = st.session_state.get(f"coc_ten_kh_{cfv}", "").strip()
+                if so_coc_submit <= 0:
+                    st.error("⚠️ Vui lòng nhập số tiền cọc lớn hơn 0")
+                elif not ten_submit:
+                    st.error("⚠️ Vui lòng nhập tên khách thuê")
+                else:
+                    with st.spinner(f"Đang lưu tiền cọc {phong_sel}..."):
+                        ok = upsert_coc(
+                            ma_phong    = phong_sel,
+                            ten_kh      = ten_submit,
+                            ngay_coc    = st.session_state.get(f"coc_ngay_{cfv}", today),
+                            so_tien_coc = so_coc_submit,
+                            ghi_chu     = ghi_chu_inp.strip(),
+                        )
+                    if ok:
+                        st.toast(
+                            f"✅ Đã lưu cọc {phong_sel} · {ten_submit} · {fmt_vnd(so_coc_submit)}",
+                            icon="📌",
+                        )
+                        st.session_state.coc_form_ver += 1
+                        st.session_state.coc_live_tien = ""
+                        st.rerun(scope="fragment")
+                    else:
+                        st.error("❌ Lỗi khi lưu. Kiểm tra kết nối Google Sheets.")
+
+    fragment_cap_nhat_coc()
